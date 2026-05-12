@@ -79,12 +79,13 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
 
-    // Shift+拖拽合并。设计：
-    //   1. 用 chart.on(mousedown) 拿源节点（ECharts 自己做坐标变换，不出错）
-    //   2. 锁源节点 el.draggable=false → 力布局不被扰动 → 邻居不动
-    //   3. 用 chart.on(mouseover/mouseout) 追踪目标，避开 roam/zoom 坐标系问题
-    //   4. zr.on(mousemove) 只用来更新虚线终点（屏幕坐标足够）
-    //   5. mouseup 时若 src+tgt 都有 → 弹合并对话框
+    // Shift+鼠标合并。设计要点：
+    //   * 节点 draggable=false（在 buildForce 里）→ ECharts 不会移动任何节点 →
+    //     力布局始终在平衡态，邻居不会被挤开。源节点保持原位，光标可以自由
+    //     移到目标节点上方与其重合。
+    //   * 通过 cancelBubble 拦掉 roam 的 mousedown，shift 状态下不平移画布。
+    //   * 源节点 ← chart.on(mousedown)；目标 ← chart.on(mouseover/mouseout)。
+    //   * 虚线起点用 mousedown 鼠标坐标（≈节点中心）；终点跟随 mousemove。
     const chart = chartInstance.current
     const zr = chart.getZr()
     let dragLine = null
@@ -92,52 +93,54 @@ export default function GraphView({ selectedTextbookId, mode }) {
     const cleanup = () => {
       const { src, tgt } = dragRef.current
       if (dragLine) { zr.remove(dragLine); dragLine = null }
-      if (src?.el) src.el.draggable = src.origDraggable !== false
       if (src?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: src.dataIndex })
       if (tgt?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
       dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
     }
 
-    // ① 源节点 via chart.on(mousedown)
+    // ① shift 状态下拦截 mousedown 阻止 roam 平移画布
+    zr.on('mousedown', e => {
+      if (!editable()) return
+      if (!shiftRef.current && !e.event?.shiftKey) return
+      e.event?.preventDefault?.()
+      e.cancelBubble = true
+    })
+
+    // ② 源节点 via chart.on(mousedown)
     chart.on('mousedown', params => {
       if (!editable()) return
       const shifted = shiftRef.current || params.event?.event?.shiftKey
       if (!shifted) return
       if (params.dataType !== 'node' || !params.data?.id) return
 
-      const data = chart.getModel().getSeriesByIndex(0).getData()
-      const el = data.getItemGraphicEl(params.dataIndex)
-      const origDraggable = el ? el.draggable : true
-      if (el) el.draggable = false  // 锁源 → 邻居不被挤开
+      // 鼠标按下时光标位置 ≈ 节点中心，用作虚线起点
+      const srcX = params.event?.offsetX ?? params.event?.event?.offsetX ?? 0
+      const srcY = params.event?.offsetY ?? params.event?.event?.offsetY ?? 0
 
-      const layout = data.getItemLayout(params.dataIndex) || {}
       dragRef.current = {
         src: {
           id: params.data.id, name: params.data.name,
-          dataIndex: params.dataIndex, el, origDraggable,
-          x: layout.x ?? 0, y: layout.y ?? 0,
+          dataIndex: params.dataIndex,
+          x: srcX, y: srcY,
         },
         tgt: null, startX: 0, startY: 0,
       }
       chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
 
-      // 黄色虚线（屏幕坐标 = layout 坐标 / 因为 zrender Line 也在图表坐标系下）
       dragLine = new echarts.graphic.Line({
-        shape: { x1: layout.x ?? 0, y1: layout.y ?? 0, x2: layout.x ?? 0, y2: layout.y ?? 0 },
+        shape: { x1: srcX, y1: srcY, x2: srcX, y2: srcY },
         style: { stroke: '#fbbf24', lineWidth: 2, lineDash: [6, 4], opacity: 0.9 },
         silent: true, z: 10000,
       })
       zr.add(dragLine)
-
-      params.event?.event?.preventDefault?.()
     })
 
-    // ② 目标节点 via mouseover（ECharts 自己负责命中）
+    // ③ 目标节点 via mouseover（ECharts 自己负责命中）
     chart.on('mouseover', params => {
       const { src, tgt } = dragRef.current
       if (!src) return
       if (params.dataType !== 'node' || !params.data?.id) return
-      if (params.data.id === src.id) return  // 不可指向自己
+      if (params.data.id === src.id) return
       if (tgt && tgt.id !== params.data.id) {
         chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
       }
@@ -154,7 +157,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
       dragRef.current.tgt = null
     })
 
-    // ③ 虚线终点跟随光标
+    // ④ 虚线终点跟随光标
     zr.on('mousemove', e => {
       if (!dragRef.current.src || !dragLine) return
       dragLine.attr({ shape: {
@@ -163,7 +166,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
       }})
     })
 
-    // ④ 松手 → 弹对话框 + 清理
+    // ⑤ 松手 → 弹对话框
     zr.on('mouseup', () => {
       const { src, tgt } = dragRef.current
       cleanup()
@@ -657,9 +660,10 @@ function buildForce(nodes, edges) {
       type: 'graph',
       layout: 'force',
       roam: true,
-      // 允许节点自由拖动调整布局。合并通过 Shift+拖拽触发（zr 命中测试，
-      // 不依赖 ECharts 高层 mouseup，所以不被原生拖拽干扰）。
-      draggable: true,
+      // 关掉原生拖拽：原生拖拽会让源节点被力布局当作扰动源，
+      // 推开周围所有邻居，导致用户无法把它"拉到"目标节点上重合。
+      // 合并通过 Shift+鼠标移动 实现，用 zr cancelBubble 拦截 roam。
+      draggable: false,
       force: { repulsion: 200, gravity: 0.05, edgeLength: [80, 200] },
       lineStyle: { curveness: 0.1 },
       emphasis: { focus: 'adjacency', scale: true },
