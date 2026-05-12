@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -187,3 +188,152 @@ def override_decision(decision_id: str, body: dict):
 @router.get("/stats")
 def get_stats():
     return _stats
+
+
+# ============ 手动决策操作 + 撤销栈 ============
+
+_undo_stack: list[dict] = []
+_UNDO_MAX = 20
+
+
+def _push_undo(description: str):
+    snapshot = {
+        "description": description,
+        "nodes": [n.model_dump() for n in _merged_nodes],
+        "edges": [e.model_dump() for e in _merged_edges],
+        "decisions": [d.model_dump() for d in _decisions],
+        "stats": dict(_stats),
+    }
+    _undo_stack.append(snapshot)
+    while len(_undo_stack) > _UNDO_MAX:
+        _undo_stack.pop(0)
+
+
+def _recompute_stats():
+    if not _stats.get("original_chars"):
+        return
+    _stats["compressed_nodes"] = len(_merged_nodes)
+    _stats["compressed_chars"] = sum(
+        len(n.name) + len(n.definition) for n in _merged_nodes
+    )
+    _stats["compression_ratio"] = round(
+        _stats["compressed_chars"] / _stats["original_chars"], 3
+    )
+    _stats["decisions_merge"] = sum(1 for d in _decisions if d.action == "merge")
+    _stats["decisions_keep"] = sum(1 for d in _decisions if d.action == "keep")
+    _stats["decisions_remove"] = sum(1 for d in _decisions if d.action == "remove")
+
+
+def _dedupe_edges():
+    seen: set[tuple[str, str, str]] = set()
+    uniq: list[KnowledgeEdge] = []
+    for e in _merged_edges:
+        if e.source == e.target:
+            continue
+        key = (e.source, e.target, e.relation_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(e)
+    _merged_edges[:] = uniq
+
+
+@router.post("/manual-merge")
+def manual_merge(body: dict):
+    """教师手动合并两个节点：把 source 合并到 target，保留信息量较大的那个。"""
+    source_id = body.get("source_id")
+    target_id = body.get("target_id")
+    if not source_id or not target_id or source_id == target_id:
+        raise HTTPException(400, "需要两个不同的节点 ID")
+
+    a = next((n for n in _merged_nodes if n.id == source_id), None)
+    b = next((n for n in _merged_nodes if n.id == target_id), None)
+    if not a or not b:
+        raise HTTPException(404, "节点不存在或已被删除")
+
+    _push_undo(f"合并「{a.name}」与「{b.name}」")
+
+    # 保留定义更长的作为代表，frequency 累加
+    kept, dropped = (a, b) if len(a.definition) >= len(b.definition) else (b, a)
+    kept.frequency = (kept.frequency or 1) + (dropped.frequency or 1)
+
+    # 移除被丢弃节点
+    _merged_nodes[:] = [n for n in _merged_nodes if n.id != dropped.id]
+
+    # 边重映射
+    for e in _merged_edges:
+        if e.source == dropped.id:
+            e.source = kept.id
+        if e.target == dropped.id:
+            e.target = kept.id
+    _dedupe_edges()
+
+    new_dec = MergeDecision(
+        decision_id=f"manual_{uuid.uuid4().hex[:8]}",
+        action="merge",
+        affected_nodes=[a.id, b.id],
+        result_node=kept.id,
+        reason=f"教师手动合并：「{a.name}」与「{b.name}」→ 保留《{kept.textbook_name}》版本",
+        confidence=1.0,
+    )
+    _decisions.append(new_dec)
+
+    _recompute_stats()
+    _persist_alignment()
+    return {"merged_into": kept.id, "decision": new_dec.model_dump()}
+
+
+@router.post("/manual-remove")
+def manual_remove(body: dict):
+    """教师手动删除一个节点。"""
+    nid = body.get("node_id")
+    target = next((n for n in _merged_nodes if n.id == nid), None)
+    if not target:
+        raise HTTPException(404, "节点不存在")
+
+    _push_undo(f"删除「{target.name}」")
+
+    _merged_nodes[:] = [n for n in _merged_nodes if n.id != nid]
+    _merged_edges[:] = [
+        e for e in _merged_edges if e.source != nid and e.target != nid
+    ]
+
+    new_dec = MergeDecision(
+        decision_id=f"manual_{uuid.uuid4().hex[:8]}",
+        action="remove",
+        affected_nodes=[nid],
+        result_node="",
+        reason=f"教师手动删除：「{target.name}」",
+        confidence=1.0,
+    )
+    _decisions.append(new_dec)
+
+    _recompute_stats()
+    _persist_alignment()
+    return {"removed": nid, "decision": new_dec.model_dump()}
+
+
+@router.post("/undo")
+def undo_last():
+    """撤销上一步手动操作。"""
+    global _merged_nodes, _merged_edges, _decisions, _stats
+    if not _undo_stack:
+        raise HTTPException(400, "没有可撤销的操作")
+    snap = _undo_stack.pop()
+    _merged_nodes = [KnowledgeNode(**n) for n in snap["nodes"]]
+    _merged_edges = [KnowledgeEdge(**e) for e in snap["edges"]]
+    _decisions = [MergeDecision(**d) for d in snap["decisions"]]
+    _stats = snap["stats"]
+    _persist_alignment()
+    return {
+        "undone": snap["description"],
+        "remaining": len(_undo_stack),
+    }
+
+
+@router.get("/undo-history")
+def undo_history():
+    return {
+        "available": len(_undo_stack),
+        "items": [s["description"] for s in _undo_stack],
+    }

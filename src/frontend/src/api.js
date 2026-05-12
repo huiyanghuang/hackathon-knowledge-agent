@@ -21,6 +21,12 @@ export const getMergedGraph = () => axios.get(`${BASE}/graph/merged`)
 export const getDecisions = () => axios.get(`${BASE}/graph/decisions`)
 export const getStats = () => axios.get(`${BASE}/graph/stats`)
 export const overrideDecision = (id, body) => axios.patch(`${BASE}/graph/decisions/${id}`, body)
+export const manualMerge = (sourceId, targetId) =>
+  axios.post(`${BASE}/graph/manual-merge`, { source_id: sourceId, target_id: targetId })
+export const manualRemove = nodeId =>
+  axios.post(`${BASE}/graph/manual-remove`, { node_id: nodeId })
+export const undoLast = () => axios.post(`${BASE}/graph/undo`)
+export const undoHistory = () => axios.get(`${BASE}/graph/undo-history`)
 
 export const ragQuery = (question, textbookIds) =>
   axios.post(`${BASE}/rag/query`, { question, textbook_ids: textbookIds })

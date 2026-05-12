@@ -1,6 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import * as echarts from 'echarts'
-import { getMergedGraph, getTextbookGraph } from '../api'
+import {
+  getMergedGraph, getTextbookGraph,
+  manualMerge, manualRemove, undoLast, undoHistory,
+} from '../api'
 
 const TEXTBOOK_COLORS = ['#6366f1','#22d3ee','#f59e0b','#10b981','#f43f5e','#a78bfa','#fb923c']
 
@@ -22,19 +25,85 @@ export default function GraphView({ selectedTextbookId, mode }) {
   const chartRef = useRef()
   const chartInstance = useRef()
   const dataRef = useRef({ nodes: [], edges: [] })
+  const dragRef = useRef({ src: null, startX: 0, startY: 0 })
+  const modeRef = useRef(mode)
+  const viewRef = useRef('force')
   const [selected, setSelected] = useState(null)
   const [stats, setStats] = useState(null)
   const [searchQ, setSearchQ] = useState('')
   const [graphLoading, setGraphLoading] = useState(false)
   const [nodeCount, setNodeCount] = useState(-1)
   const [view, setView] = useState('force')
+  const [confirmDlg, setConfirmDlg] = useState(null)  // {kind:'merge'|'remove', ...}
+  const [showHelp, setShowHelp] = useState(false)
+  const [undoCount, setUndoCount] = useState(0)
+  const [toast, setToast] = useState(null)
+  const helpShownRef = useRef(false)  // 本会话首次进入 merged 时弹一次
+
+  const showToast = (msg, kind = 'info') => {
+    setToast({ msg, kind })
+    setTimeout(() => setToast(null), 2400)
+  }
+
+  const refreshUndoCount = async () => {
+    try {
+      const { data } = await undoHistory()
+      setUndoCount(data.available || 0)
+    } catch { /* ignore */ }
+  }
 
   useEffect(() => {
     if (!chartRef.current) return
     chartInstance.current = echarts.init(chartRef.current)
+
+    // 点击节点 = 查看详情
     chartInstance.current.on('click', params => {
       if (params.dataType === 'node' && params.data?.definition) setSelected(params.data)
     })
+
+    const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
+
+    // 拖拽起点：mousedown 在节点上（仅整合视图+力导向图启用编辑）
+    chartInstance.current.on('mousedown', params => {
+      if (!editable()) return
+      if (params.dataType === 'node' && params.data?.id) {
+        dragRef.current = {
+          src: { id: params.data.id, name: params.data.name },
+          startX: params.event?.offsetX || 0,
+          startY: params.event?.offsetY || 0,
+        }
+      }
+    })
+
+    // 拖拽终点：mouseup 在另一个节点上 → 弹合并确认
+    chartInstance.current.on('mouseup', params => {
+      const { src, startX, startY } = dragRef.current
+      dragRef.current = { src: null, startX: 0, startY: 0 }
+      if (!editable() || !src) return
+      if (params.dataType !== 'node' || !params.data?.id) return
+      if (params.data.id === src.id) return  // 原地松手 → 点击查看，不合并
+      const dx = (params.event?.offsetX || 0) - startX
+      const dy = (params.event?.offsetY || 0) - startY
+      if (Math.hypot(dx, dy) < 15) return  // 没拖够距离
+      setConfirmDlg({
+        kind: 'merge',
+        source: src,
+        target: { id: params.data.id, name: params.data.name },
+      })
+    })
+
+    // 右键节点 = 删除确认
+    chartInstance.current.on('contextmenu', params => {
+      if (!editable()) return
+      if (params.dataType === 'node' && params.data?.id) {
+        params.event?.event?.preventDefault?.()
+        setConfirmDlg({
+          kind: 'remove',
+          target: { id: params.data.id, name: params.data.name },
+        })
+      }
+    })
+
     const ro = new ResizeObserver(() => chartInstance.current?.resize())
     ro.observe(chartRef.current)
     setTimeout(() => chartInstance.current?.resize(), 50)
@@ -43,6 +112,26 @@ export default function GraphView({ selectedTextbookId, mode }) {
       chartInstance.current?.dispose()
     }
   }, [])
+
+  // Ctrl+Z 撤销
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && mode === 'merged') {
+        e.preventDefault()
+        doUndo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [mode])
+
+  // 进入整合视图首次 → 弹使用说明
+  useEffect(() => {
+    if (mode === 'merged' && !helpShownRef.current) {
+      helpShownRef.current = true
+      setShowHelp(true)
+    }
+  }, [mode])
 
   useEffect(() => {
     if (mode === 'merged') {
@@ -62,8 +151,11 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
   // Re-render whenever view switches (data unchanged).
   useEffect(() => {
+    viewRef.current = view
     if (dataRef.current.nodes.length) renderCurrent()
   }, [view])
+
+  useEffect(() => { modeRef.current = mode }, [mode])
 
   const loadSingle = async (tid) => {
     setGraphLoading(true)
@@ -91,11 +183,53 @@ export default function GraphView({ selectedTextbookId, mode }) {
       renderCurrent()
       setStats(data.stats)
       setNodeCount(data.nodes.length)
+      refreshUndoCount()
     } catch (e) {
       console.error('loadMerged failed:', e)
       setNodeCount(0)
     } finally {
       setGraphLoading(false)
+    }
+  }
+
+  const doMerge = async () => {
+    if (!confirmDlg || confirmDlg.kind !== 'merge') return
+    const { source, target } = confirmDlg
+    setConfirmDlg(null)
+    try {
+      await manualMerge(source.id, target.id)
+      showToast(`已合并：${source.name} → ${target.name}`, 'success')
+      await loadMerged()
+      window.dispatchEvent(new CustomEvent('align-finished'))
+    } catch (e) {
+      showToast('合并失败：' + (e?.response?.data?.detail || e.message), 'error')
+    }
+  }
+
+  const doRemove = async () => {
+    if (!confirmDlg || confirmDlg.kind !== 'remove') return
+    const { target } = confirmDlg
+    setConfirmDlg(null)
+    try {
+      await manualRemove(target.id)
+      showToast(`已删除：${target.name}`, 'success')
+      await loadMerged()
+      window.dispatchEvent(new CustomEvent('align-finished'))
+    } catch (e) {
+      showToast('删除失败：' + (e?.response?.data?.detail || e.message), 'error')
+    }
+  }
+
+  const doUndo = async () => {
+    try {
+      const { data } = await undoLast()
+      showToast(`已撤销：${data.undone}`, 'success')
+      await loadMerged()
+      window.dispatchEvent(new CustomEvent('align-finished'))
+    } catch (e) {
+      const msg = e?.response?.data?.detail || e.message
+      if (msg.includes('没有可撤销')) showToast('没有可撤销的操作', 'info')
+      else showToast('撤销失败：' + msg, 'error')
     }
   }
 
@@ -157,6 +291,21 @@ export default function GraphView({ selectedTextbookId, mode }) {
             opacity: (view === 'force' || view === 'tree') ? 1 : 0.5,
           }}
         />
+        {mode === 'merged' && (
+          <>
+            <button onClick={doUndo} disabled={undoCount === 0} title="Ctrl+Z" style={{
+              background: undoCount > 0 ? '#1e293b' : '#0f1117',
+              border: '1px solid #334155', borderRadius: 6,
+              color: undoCount > 0 ? '#fbbf24' : '#475569',
+              padding: '5px 10px', fontSize: 12,
+              cursor: undoCount > 0 ? 'pointer' : 'not-allowed',
+            }}>↶ 撤销 {undoCount > 0 ? `(${undoCount})` : ''}</button>
+            <button onClick={() => setShowHelp(true)} title="拖拽合并使用说明" style={{
+              background: '#1e293b', border: '1px solid #334155', borderRadius: 6,
+              color: '#94a3b8', padding: '5px 10px', fontSize: 12, cursor: 'pointer',
+            }}>?</button>
+          </>
+        )}
       </div>
 
       {stats && (
@@ -241,8 +390,119 @@ export default function GraphView({ selectedTextbookId, mode }) {
           ))}
         </div>
       )}
+
+      {/* 操作引导 / 使用说明 */}
+      {showHelp && (
+        <div onClick={() => setShowHelp(false)} style={modalBackdrop}>
+          <div onClick={e => e.stopPropagation()} style={modalBox}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+              <span style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9' }}>🎯 整合视图操作指南</span>
+              <button onClick={() => setShowHelp(false)} style={closeBtn}>✕</button>
+            </div>
+            <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.85 }}>
+              在「整合视图 + 力导向图」下，你可以手动调整知识图谱的合并决策：
+              <table style={{ width: '100%', marginTop: 10, fontSize: 13, borderCollapse: 'collapse' }}>
+                <tbody>
+                  <tr><td style={helpCell}>🖱️ <b>左键点击</b></td><td style={helpCell}>查看该知识点的定义、章节、来源</td></tr>
+                  <tr><td style={helpCell}>↔️ <b>拖拽节点 A 到节点 B</b></td><td style={helpCell}>合并两个知识点 → 保留定义较完整的版本</td></tr>
+                  <tr><td style={helpCell}>🖱️ <b>右键点击</b></td><td style={helpCell}>删除该知识点（从整合结果中移除）</td></tr>
+                  <tr><td style={helpCell}>↶ <b>撤销 / Ctrl+Z</b></td><td style={helpCell}>回滚最近一次手动操作（最多 20 步）</td></tr>
+                </tbody>
+              </table>
+              <div style={{ marginTop: 14, padding: 10, background: '#0f172a', borderRadius: 6, fontSize: 12, color: '#94a3b8', borderLeft: '3px solid #6366f1' }}>
+                💡 每次合并/删除前会弹确认对话框，操作后会自动持久化（重启不丢失）。
+                所有手动决策会出现在右侧「整合操作」面板的决策列表里。
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+              <button onClick={() => setShowHelp(false)} style={primaryBtn}>知道了</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 确认对话框：合并 / 删除 */}
+      {confirmDlg && (
+        <div onClick={() => setConfirmDlg(null)} style={modalBackdrop}>
+          <div onClick={e => e.stopPropagation()} style={{ ...modalBox, maxWidth: 440 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: '#f1f5f9', marginBottom: 10 }}>
+              {confirmDlg.kind === 'merge' ? '🔀 合并知识点' : '🗑️ 删除知识点'}
+            </div>
+            <div style={{ fontSize: 13, color: '#cbd5e1', lineHeight: 1.7 }}>
+              {confirmDlg.kind === 'merge' ? (
+                <>
+                  将把 <b style={{ color: '#fbbf24' }}>「{confirmDlg.source.name}」</b> 合并到
+                  {' '}<b style={{ color: '#22d3ee' }}>「{confirmDlg.target.name}」</b>。
+                  <div style={{ marginTop: 10, padding: 10, background: '#0f172a', borderRadius: 6, fontSize: 12, color: '#94a3b8' }}>
+                    • 保留<b>定义较长</b>的版本作为代表<br/>
+                    • 两个节点的相关边会自动重连到合并后的节点<br/>
+                    • 频次（frequency）累加<br/>
+                    • 该决策会附加到「整合操作」面板的决策列表
+                  </div>
+                </>
+              ) : (
+                <>
+                  将从整合结果中删除 <b style={{ color: '#f43f5e' }}>「{confirmDlg.target.name}」</b>。
+                  <div style={{ marginTop: 10, padding: 10, background: '#0f172a', borderRadius: 6, fontSize: 12, color: '#94a3b8' }}>
+                    • 该节点及其所有相关边一并移除<br/>
+                    • 不会从教材原文中删除，仅从整合后图谱中移除<br/>
+                    • 该决策会附加到「整合操作」面板的决策列表
+                  </div>
+                </>
+              )}
+              <div style={{ marginTop: 8, fontSize: 11, color: '#64748b' }}>
+                可以通过 ↶ 撤销 或 Ctrl+Z 回滚。
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+              <button onClick={() => setConfirmDlg(null)} style={secondaryBtn}>取消</button>
+              <button onClick={confirmDlg.kind === 'merge' ? doMerge : doRemove}
+                style={confirmDlg.kind === 'merge' ? primaryBtn : dangerBtn}>
+                {confirmDlg.kind === 'merge' ? '确认合并' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: 'fixed', top: 24, right: 24, zIndex: 200,
+          background: toast.kind === 'error' ? '#7f1d1d' : toast.kind === 'success' ? '#065f46' : '#1e293b',
+          color: '#fff', border: '1px solid ' + (toast.kind === 'error' ? '#ef4444' : toast.kind === 'success' ? '#10b981' : '#334155'),
+          borderRadius: 8, padding: '10px 16px', fontSize: 13, boxShadow: '0 8px 24px #0008',
+        }}>{toast.msg}</div>
+      )}
     </div>
   )
+}
+
+// ============ Modal / button styles ============
+
+const modalBackdrop = {
+  position: 'fixed', inset: 0, background: '#0f1117cc', backdropFilter: 'blur(4px)',
+  display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100,
+}
+const modalBox = {
+  background: '#1e293b', border: '1px solid #334155', borderRadius: 12,
+  padding: 20, maxWidth: 520, width: '90%', boxShadow: '0 12px 48px #000a',
+}
+const closeBtn = {
+  background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 16,
+}
+const helpCell = { padding: '6px 8px', borderTop: '1px solid #334155', verticalAlign: 'top' }
+const primaryBtn = {
+  background: '#4f46e5', color: '#fff', border: 'none', borderRadius: 6,
+  padding: '7px 16px', fontSize: 13, cursor: 'pointer', fontWeight: 600,
+}
+const secondaryBtn = {
+  background: '#1e293b', color: '#94a3b8', border: '1px solid #334155',
+  borderRadius: 6, padding: '7px 16px', fontSize: 13, cursor: 'pointer',
+}
+const dangerBtn = {
+  background: '#dc2626', color: '#fff', border: 'none', borderRadius: 6,
+  padding: '7px 16px', fontSize: 13, cursor: 'pointer', fontWeight: 600,
 }
 
 // ============ View Builders ============
