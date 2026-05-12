@@ -14,6 +14,13 @@ const RELATION_COLORS = {
   applies_to: '#f59e0b',
 }
 
+const RELATION_LABELS = {
+  prerequisite: '前置依赖',
+  parallel: '并列关系',
+  contains: '包含关系',
+  applies_to: '应用关系',
+}
+
 const VIEWS = [
   { key: 'force', label: '力导向' },
   { key: 'tree',  label: '树状图' },
@@ -486,7 +493,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
           {Object.entries(RELATION_COLORS).map(([k, c]) => (
             <span key={k} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
               <span style={{ width: 16, height: 2, background: c, display: 'inline-block' }} />
-              {k}
+              {RELATION_LABELS[k] || k}
             </span>
           ))}
         </div>
@@ -624,7 +631,7 @@ function buildForce(nodes, edges) {
       trigger: 'item',
       formatter: p => p.dataType === 'node'
         ? `<b>${p.data.name}</b><br/>${p.data.chapter || ''}<br/>出现频次: ${p.data.frequency || 1}`
-        : p.data.relation_type || '',
+        : (RELATION_LABELS[p.data.relation_type] || p.data.relation_type || ''),
     },
     series: [{
       type: 'graph',
