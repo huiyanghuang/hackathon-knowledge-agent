@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { getAlignStatus, getDecisions, getStats, startAlign } from './api'
+import { getAlignStatus, getDecisions, getMergedGraph, getStats, startAlign } from './api'
 import ChatPanel from './components/ChatPanel'
 import GraphView from './components/GraphView'
 import RAGPanel from './components/RAGPanel'
@@ -104,6 +104,8 @@ export default function App() {
 function DecisionPanel() {
   const [decisions, setDecisions] = useState([])
   const [stats, setStats] = useState(null)
+  const [nodeMap, setNodeMap] = useState({})  // result_node id → {name, category, textbook_name, frequency}
+  const [filter, setFilter] = useState('all')  // all | merge | keep | remove | manual
   const [loading, setLoading] = useState(false)
   const [alignState, setAlignState] = useState({ running: false, progress: 0, message: '', error: null, done: false })
   const pollRef = useRef(null)
@@ -111,12 +113,33 @@ function DecisionPanel() {
   const load = async () => {
     setLoading(true)
     try {
-      const [d, s] = await Promise.all([getDecisions(), getStats()])
+      const [d, s, g] = await Promise.all([getDecisions(), getStats(), getMergedGraph()])
       setDecisions(d.data)
       setStats(s.data)
+      const map = {}
+      for (const n of g.data.nodes || []) map[n.id] = n
+      setNodeMap(map)
     } catch {}
     setLoading(false)
   }
+
+  // 从 reason 文本里捞「name」作为兜底（已删除节点不在 nodeMap 里）
+  const nameFromReason = (reason) => {
+    const m = reason?.match(/「([^」]+)」/)
+    return m ? m[1] : null
+  }
+  const labelOf = (d) => {
+    const node = nodeMap[d.result_node] || nodeMap[d.affected_nodes?.[0]]
+    if (node?.name) return node.name
+    return nameFromReason(d.reason) || '(节点已不可见)'
+  }
+  const isManual = (d) => d.decision_id?.startsWith('manual_')
+
+  const filtered = decisions.filter(d => {
+    if (filter === 'all') return true
+    if (filter === 'manual') return isManual(d)
+    return d.action === filter
+  })
 
   const stopPolling = () => {
     if (pollRef.current) {
@@ -216,28 +239,62 @@ function DecisionPanel() {
         </div>
       )}
 
-      <button onClick={load} disabled={loading} style={{
-        background: '#1e293b', border: '1px solid #334155', borderRadius: 6,
-        color: '#94a3b8', padding: '6px 12px', cursor: 'pointer', fontSize: 12,
-      }}>
-        {loading ? '刷新中...' : '刷新决策列表'}
-      </button>
-
-      {decisions.map(d => (
-        <div key={d.decision_id} style={{
-          background: '#1e293b', borderRadius: 8, padding: 10, border: '1px solid #334155', fontSize: 12,
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <button onClick={load} disabled={loading} style={{
+          background: '#1e293b', border: '1px solid #334155', borderRadius: 6,
+          color: '#94a3b8', padding: '6px 12px', cursor: 'pointer', fontSize: 12,
         }}>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{
-              background: d.action === 'merge' ? '#4f46e5' : d.action === 'keep' ? '#065f46' : '#7f1d1d',
-              color: '#fff', borderRadius: 4, padding: '1px 6px', fontSize: 10,
-            }}>{d.action}</span>
-            <span style={{ color: '#94a3b8' }}>{d.decision_id}</span>
-            <span style={{ color: '#64748b', marginLeft: 'auto' }}>{(d.confidence * 100).toFixed(0)}%</span>
+          {loading ? '刷新中...' : '🔄 刷新'}
+        </button>
+        {['all','merge','keep','remove','manual'].map(k => (
+          <button key={k} onClick={() => setFilter(k)} style={{
+            background: filter === k ? '#4f46e5' : '#1e293b',
+            border: '1px solid #334155', borderRadius: 6,
+            color: filter === k ? '#fff' : '#94a3b8',
+            padding: '4px 8px', cursor: 'pointer', fontSize: 11,
+          }}>{({all:'全部',merge:'合并',keep:'保留',remove:'删除',manual:'手动'})[k]}</button>
+        ))}
+        <span style={{ color: '#64748b', fontSize: 11, marginLeft: 'auto' }}>{filtered.length} 条</span>
+      </div>
+
+      {filtered.map(d => {
+        const name = labelOf(d)
+        const node = nodeMap[d.result_node] || nodeMap[d.affected_nodes?.[0]]
+        const manual = isManual(d)
+        const actionLabel = { merge: '合并', keep: '保留', remove: '删除' }[d.action] || d.action
+        const actionColor = d.action === 'merge' ? '#4f46e5' : d.action === 'keep' ? '#065f46' : '#7f1d1d'
+        return (
+          <div key={d.decision_id} style={{
+            background: '#1e293b', borderRadius: 8, padding: 10,
+            border: manual ? '1px solid #f59e0b' : '1px solid #334155', fontSize: 12,
+          }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{
+                background: actionColor, color: '#fff', borderRadius: 4,
+                padding: '1px 6px', fontSize: 10, fontWeight: 600,
+              }}>{actionLabel}</span>
+              {manual && (
+                <span style={{
+                  background: '#f59e0b', color: '#0f1117', borderRadius: 4,
+                  padding: '1px 6px', fontSize: 10, fontWeight: 700,
+                }}>手动</span>
+              )}
+              <span style={{ color: '#e2e8f0', fontWeight: 700, fontSize: 13 }}>{name}</span>
+              <span style={{ color: '#64748b', marginLeft: 'auto', fontSize: 10 }}>
+                {(d.confidence * 100).toFixed(0)}% · {d.decision_id}
+              </span>
+            </div>
+            {node && (
+              <div style={{ marginTop: 4, fontSize: 11, color: '#6366f1' }}>
+                {node.category}
+                {d.action === 'merge' && node.frequency > 1 && ` · 出现 ${node.frequency} 次`}
+                {node.textbook_name && ` · 《${node.textbook_name}》`}
+              </div>
+            )}
+            <div style={{ marginTop: 6, color: '#94a3b8', lineHeight: 1.5 }}>{d.reason}</div>
           </div>
-          <div style={{ marginTop: 6, color: '#94a3b8', lineHeight: 1.5 }}>{d.reason}</div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
