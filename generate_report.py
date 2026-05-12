@@ -14,8 +14,39 @@ PROCESSED_DIR = os.path.join(ROOT, "data", "processed")
 REPORT_DIR = os.path.join(ROOT, "report")
 os.makedirs(REPORT_DIR, exist_ok=True)
 
-from models.schemas import KnowledgeEdge, KnowledgeNode
-from services.aligner import align_nodes, compress_nodes, rebuild_edges
+ALIGN_CACHE = os.path.join(PROCESSED_DIR, "align_result.json")
+
+
+class _SimpleNode:
+    """轻量替代 pydantic 模型，避免缓存命中时引入重依赖。"""
+    def __init__(self, **kw):
+        self.id = kw.get("id", "")
+        self.name = kw.get("name", "")
+        self.definition = kw.get("definition", "")
+        self.category = kw.get("category", "")
+        self.chapter = kw.get("chapter", "")
+        self.page = kw.get("page", 0)
+        self.textbook_id = kw.get("textbook_id", "")
+        self.textbook_name = kw.get("textbook_name", "")
+        self.frequency = kw.get("frequency", 1)
+
+
+class _SimpleEdge:
+    def __init__(self, **kw):
+        self.source = kw.get("source", "")
+        self.target = kw.get("target", "")
+        self.relation_type = kw.get("relation_type", "")
+        self.description = kw.get("description", "")
+
+
+class _SimpleDecision:
+    def __init__(self, **kw):
+        self.decision_id = kw.get("decision_id", "")
+        self.action = kw.get("action", "")
+        self.affected_nodes = kw.get("affected_nodes", [])
+        self.result_node = kw.get("result_node", "")
+        self.reason = kw.get("reason", "")
+        self.confidence = kw.get("confidence", 0.0)
 
 
 def load_all():
@@ -23,15 +54,15 @@ def load_all():
     all_nodes = []
     all_edges = []
     for fname in sorted(os.listdir(PROCESSED_DIR)):
-        if not fname.endswith(".json") or fname == "summary.json":
+        if not fname.endswith(".json") or fname in ("summary.json", "align_result.json"):
             continue
         with open(os.path.join(PROCESSED_DIR, fname), encoding="utf-8") as f:
             d = json.load(f)
         textbooks.append(d)
         for n in d.get("nodes", []):
-            all_nodes.append(KnowledgeNode(**n))
+            all_nodes.append(_SimpleNode(**n))
         for e in d.get("edges", []):
-            all_edges.append(KnowledgeEdge(**e))
+            all_edges.append(_SimpleEdge(**e))
     return textbooks, all_nodes, all_edges
 
 
@@ -44,23 +75,47 @@ def main():
 
     print(f"共 {len(textbooks)} 本教材，{len(raw_nodes)} 个原始节点，{len(raw_edges)} 条关系")
 
-    print("执行跨教材对齐...")
-    merged, decisions = align_nodes(raw_nodes)
-
-    decision_map = {}
-    for d in decisions:
-        if d.result_node:
-            for old_id in d.affected_nodes:
-                decision_map[old_id] = d.result_node
-
-    kept_ids = {n.id for n in merged}
-    remapped_edges = rebuild_edges(raw_edges, kept_ids, decision_map)
-
-    original_chars = sum(len(n.name) + len(n.definition) for n in raw_nodes)
-    compressed = compress_nodes(merged, original_chars)
-    compressed_ids = {n.id for n in compressed}
-    final_edges = [e for e in remapped_edges if e.source in compressed_ids and e.target in compressed_ids]
-    compressed_chars = sum(len(n.name) + len(n.definition) for n in compressed)
+    if os.path.exists(ALIGN_CACHE):
+        print(f"复用对齐结果缓存：{ALIGN_CACHE}")
+        with open(ALIGN_CACHE, encoding="utf-8") as f:
+            cache = json.load(f)
+        compressed = [_SimpleNode(**n) for n in cache["nodes"]]
+        final_edges = [_SimpleEdge(**e) for e in cache["edges"]]
+        decisions = [_SimpleDecision(**d) for d in cache["decisions"]]
+        stats = cache.get("stats", {})
+        original_chars = stats.get("original_chars") or sum(len(n.name) + len(n.definition) for n in raw_nodes)
+        compressed_chars = stats.get("compressed_chars") or sum(len(n.name) + len(n.definition) for n in compressed)
+        merged_count = stats.get("merged_nodes", len(compressed))
+    else:
+        print("执行跨教材对齐（无缓存，将调用 LLM，需要 numpy/pydantic/google-generativeai 等依赖）...")
+        from models.schemas import KnowledgeEdge, KnowledgeNode  # noqa: F401
+        from services.aligner import align_nodes, compress_nodes, rebuild_edges
+        # raw_nodes/raw_edges 上面是 _SimpleNode；重新对齐路径需要 pydantic 模型，重读
+        raw_nodes_pyd = []
+        raw_edges_pyd = []
+        for fname in sorted(os.listdir(PROCESSED_DIR)):
+            if not fname.endswith(".json") or fname in ("summary.json", "align_result.json"):
+                continue
+            with open(os.path.join(PROCESSED_DIR, fname), encoding="utf-8") as f:
+                d = json.load(f)
+            for n in d.get("nodes", []):
+                raw_nodes_pyd.append(KnowledgeNode(**n))
+            for e in d.get("edges", []):
+                raw_edges_pyd.append(KnowledgeEdge(**e))
+        merged, decisions = align_nodes(raw_nodes_pyd)
+        decision_map = {}
+        for d in decisions:
+            if d.result_node:
+                for old_id in d.affected_nodes:
+                    decision_map[old_id] = d.result_node
+        kept_ids = {n.id for n in merged}
+        remapped_edges = rebuild_edges(raw_edges_pyd, kept_ids, decision_map)
+        original_chars = sum(len(n.name) + len(n.definition) for n in raw_nodes_pyd)
+        compressed = compress_nodes(merged, original_chars)
+        compressed_ids = {n.id for n in compressed}
+        final_edges = [e for e in remapped_edges if e.source in compressed_ids and e.target in compressed_ids]
+        compressed_chars = sum(len(n.name) + len(n.definition) for n in compressed)
+        merged_count = len(merged)
 
     merge_decisions = [d for d in decisions if d.action == "merge"]
     keep_decisions = [d for d in decisions if d.action == "keep"]
@@ -108,7 +163,7 @@ def main():
         f"- 原始知识节点总数：**{len(raw_nodes)}**",
         f"- 跨教材合并操作：**{len(merge_decisions)}** 次",
         f"- 保留独立节点：**{len(keep_decisions)}** 个",
-        f"- 合并后节点数：**{len(merged)}**",
+        f"- 合并后节点数：**{merged_count}**",
         f"- 压缩后节点数：**{len(compressed)}**（保留 {len(compressed)/len(raw_nodes)*100:.1f}% 节点）",
         f"- 原始知识字数：**{original_chars:,}**",
         f"- 整合后字数：**{compressed_chars:,}**（压缩至 **{ratio}%**）",

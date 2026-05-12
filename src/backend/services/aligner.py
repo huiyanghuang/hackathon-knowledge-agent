@@ -204,7 +204,7 @@ def align_nodes(
                 action="merge",
                 affected_nodes=[m.id for m in members],
                 result_node=merged_id,
-                reason=f"在{len(members)}本教材（{'、'.join(textbook_names)}）中均出现，保留《{best.textbook_name}》版本因其描述最完整",
+                reason=f"在{len(textbook_names)}本教材（{'、'.join(textbook_names)}）中共{len(members)}处提及，保留《{best.textbook_name}》版本因其描述最完整",
                 confidence=0.9,
             ))
 
