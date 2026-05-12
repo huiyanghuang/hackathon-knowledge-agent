@@ -53,6 +53,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
   const [showHelp, setShowHelp] = useState(false)
   const [undoCount, setUndoCount] = useState(0)
   const [toast, setToast] = useState(null)
+  const [shiftHeld, setShiftHeld] = useState(false)  // UI 实时显示，方便用户确认监听器在工作
   const helpShownRef = useRef(false)  // 本会话首次进入 merged 时弹一次
 
   const showToast = (msg, kind = 'info') => {
@@ -78,122 +79,94 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
 
-    // Shift+拖拽合并。关键设计：
-    //   1. mousedown 时把源节点的 zrender draggable 临时设为 false，
-    //      让源节点不跟随鼠标 → 力布局没扰动 → 邻居不会被挤开
-    //   2. 用自绘的黄色虚线 (echarts.graphic.Line) 从源节点拉到光标
-    //      作为视觉反馈，松手时移除
-    //   3. 用 getItemLayout + symbolSize 做坐标命中测试找目标节点
-    const zr = chartInstance.current.getZr()
-    let dragLine = null  // 当前虚线指示器
+    // Shift+拖拽合并。设计：
+    //   1. 用 chart.on(mousedown) 拿源节点（ECharts 自己做坐标变换，不出错）
+    //   2. 锁源节点 el.draggable=false → 力布局不被扰动 → 邻居不动
+    //   3. 用 chart.on(mouseover/mouseout) 追踪目标，避开 roam/zoom 坐标系问题
+    //   4. zr.on(mousemove) 只用来更新虚线终点（屏幕坐标足够）
+    //   5. mouseup 时若 src+tgt 都有 → 弹合并对话框
+    const chart = chartInstance.current
+    const zr = chart.getZr()
+    let dragLine = null
 
-    const findNodeAt = (px, py, excludeId) => {
-      try {
-        const data = chartInstance.current?.getModel?.()?.getSeriesByIndex?.(0)?.getData?.()
-        if (!data) return null
-        let result = null
-        let best = Infinity
-        data.each(i => {
-          const layout = data.getItemLayout(i)
-          if (!layout || layout.x == null) return
-          const item = data.getRawDataItem(i) || {}
-          if (!item.id || item.id === excludeId) return
-          const sz = data.getItemVisual(i, 'symbolSize')
-          const r = (Array.isArray(sz) ? sz[0] : sz) || 14
-          const dist = Math.hypot(layout.x - px, layout.y - py)
-          if (dist <= r + 6 && dist < best) {
-            best = dist
-            result = { id: item.id, name: item.name, dataIndex: i }
-          }
-        })
-        return result
-      } catch { return null }
-    }
-
-    const removeDragLine = () => {
+    const cleanup = () => {
+      const { src, tgt } = dragRef.current
       if (dragLine) { zr.remove(dragLine); dragLine = null }
+      if (src?.el) src.el.draggable = src.origDraggable !== false
+      if (src?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: src.dataIndex })
+      if (tgt?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
+      dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
     }
 
-    const restoreSourceDraggable = () => {
-      const { src } = dragRef.current
-      if (src?.el) {
-        src.el.draggable = src.origDraggable !== false
-      }
-    }
-
-    const clearHighlights = () => {
-      const c = chartInstance.current
-      if (!c) return
-      if (dragRef.current.src?.dataIndex != null) {
-        c.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: dragRef.current.src.dataIndex })
-      }
-      if (dragRef.current.tgt?.dataIndex != null) {
-        c.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: dragRef.current.tgt.dataIndex })
-      }
-    }
-
-    zr.on('mousedown', e => {
+    // ① 源节点 via chart.on(mousedown)
+    chart.on('mousedown', params => {
       if (!editable()) return
-      // 必须按住 Shift（全局 ref 兜底，应对 zrender 事件不透传 shiftKey 的版本）
-      if (!shiftRef.current && !e.event?.shiftKey) return
-      const node = findNodeAt(e.offsetX, e.offsetY)
-      if (!node) return
+      const shifted = shiftRef.current || params.event?.event?.shiftKey
+      if (!shifted) return
+      if (params.dataType !== 'node' || !params.data?.id) return
 
-      // 锁住源节点，禁止 zrender/ECharts 拖动它（关键：阻止邻居被挤开）
-      const data = chartInstance.current.getModel().getSeriesByIndex(0).getData()
-      const el = data.getItemGraphicEl(node.dataIndex)
+      const data = chart.getModel().getSeriesByIndex(0).getData()
+      const el = data.getItemGraphicEl(params.dataIndex)
       const origDraggable = el ? el.draggable : true
-      if (el) el.draggable = false
+      if (el) el.draggable = false  // 锁源 → 邻居不被挤开
 
-      const srcLayout = data.getItemLayout(node.dataIndex)
-      const srcX = srcLayout?.x ?? e.offsetX
-      const srcY = srcLayout?.y ?? e.offsetY
-
-      // 阻止 roam（画布平移）
-      e.event.preventDefault?.()
-      e.event.stopPropagation?.()
-
+      const layout = data.getItemLayout(params.dataIndex) || {}
       dragRef.current = {
-        src: { ...node, el, origDraggable, x: srcX, y: srcY },
-        tgt: null, startX: e.offsetX, startY: e.offsetY,
+        src: {
+          id: params.data.id, name: params.data.name,
+          dataIndex: params.dataIndex, el, origDraggable,
+          x: layout.x ?? 0, y: layout.y ?? 0,
+        },
+        tgt: null, startX: 0, startY: 0,
       }
-      chartInstance.current.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: node.dataIndex })
+      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
 
-      // 自绘提示虚线
+      // 黄色虚线（屏幕坐标 = layout 坐标 / 因为 zrender Line 也在图表坐标系下）
       dragLine = new echarts.graphic.Line({
-        shape: { x1: srcX, y1: srcY, x2: e.offsetX, y2: e.offsetY },
+        shape: { x1: layout.x ?? 0, y1: layout.y ?? 0, x2: layout.x ?? 0, y2: layout.y ?? 0 },
         style: { stroke: '#fbbf24', lineWidth: 2, lineDash: [6, 4], opacity: 0.9 },
         silent: true, z: 10000,
       })
       zr.add(dragLine)
+
+      params.event?.event?.preventDefault?.()
     })
 
-    zr.on('mousemove', e => {
+    // ② 目标节点 via mouseover（ECharts 自己负责命中）
+    chart.on('mouseover', params => {
       const { src, tgt } = dragRef.current
       if (!src) return
-
-      // 更新虚线终点
-      if (dragLine) {
-        dragLine.attr({ shape: { x1: src.x, y1: src.y, x2: e.offsetX, y2: e.offsetY } })
+      if (params.dataType !== 'node' || !params.data?.id) return
+      if (params.data.id === src.id) return  // 不可指向自己
+      if (tgt && tgt.id !== params.data.id) {
+        chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
       }
-
-      const target = findNodeAt(e.offsetX, e.offsetY, src.id)
-      if (target?.id === tgt?.id) return  // 同一个目标不重复高亮
-      if (tgt?.dataIndex != null) {
-        chartInstance.current.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
-      }
-      if (target) {
-        chartInstance.current.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: target.dataIndex })
-      }
-      dragRef.current.tgt = target || null
+      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
+      dragRef.current.tgt = { id: params.data.id, name: params.data.name, dataIndex: params.dataIndex }
     })
 
+    chart.on('mouseout', params => {
+      const { src, tgt } = dragRef.current
+      if (!src || !tgt) return
+      if (params.dataType !== 'node') return
+      if (params.data?.id !== tgt.id) return
+      chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
+      dragRef.current.tgt = null
+    })
+
+    // ③ 虚线终点跟随光标
+    zr.on('mousemove', e => {
+      if (!dragRef.current.src || !dragLine) return
+      dragLine.attr({ shape: {
+        x1: dragRef.current.src.x, y1: dragRef.current.src.y,
+        x2: e.offsetX, y2: e.offsetY,
+      }})
+    })
+
+    // ④ 松手 → 弹对话框 + 清理
     zr.on('mouseup', () => {
       const { src, tgt } = dragRef.current
-      removeDragLine()
-      restoreSourceDraggable()
-      clearHighlights()
-      dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
+      cleanup()
       if (!src || !tgt) return
       setConfirmDlg({
         kind: 'merge',
@@ -202,12 +175,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
       })
     })
 
-    zr.on('mouseleave', () => {
-      removeDragLine()
-      restoreSourceDraggable()
-      clearHighlights()
-      dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
-    })
+    zr.on('mouseleave', cleanup)
 
     // 右键节点 = 删除确认
     chartInstance.current.on('contextmenu', params => {
@@ -233,16 +201,25 @@ export default function GraphView({ selectedTextbookId, mode }) {
   // Ctrl+Z 撤销 + 全局 Shift 状态追踪
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === 'Shift') shiftRef.current = true
+      if (e.key === 'Shift') {
+        shiftRef.current = true
+        setShiftHeld(true)
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && mode === 'merged') {
         e.preventDefault()
         doUndo()
       }
     }
     const onKeyUp = (e) => {
-      if (e.key === 'Shift') shiftRef.current = false
+      if (e.key === 'Shift') {
+        shiftRef.current = false
+        setShiftHeld(false)
+      }
     }
-    const onBlur = () => { shiftRef.current = false }  // 窗口失焦兜底
+    const onBlur = () => {
+      shiftRef.current = false
+      setShiftHeld(false)
+    }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     window.addEventListener('blur', onBlur)
@@ -421,6 +398,16 @@ export default function GraphView({ selectedTextbookId, mode }) {
         />
         {mode === 'merged' && (
           <>
+            {view === 'force' && (
+              <span title={shiftHeld ? 'Shift 已按下，可拖拽合并' : '按住 Shift 进入合并模式'} style={{
+                fontSize: 11, padding: '4px 8px',
+                background: shiftHeld ? '#fbbf24' : '#1e293b',
+                color: shiftHeld ? '#0f1117' : '#475569',
+                border: '1px solid ' + (shiftHeld ? '#fbbf24' : '#334155'),
+                borderRadius: 6, fontWeight: shiftHeld ? 700 : 400,
+                transition: 'all 0.1s',
+              }}>⇧ {shiftHeld ? '已按下' : '未按'}</span>
+            )}
             <button onClick={doUndo} disabled={undoCount === 0} title="Ctrl+Z" style={{
               background: undoCount > 0 ? '#1e293b' : '#0f1117',
               border: '1px solid #334155', borderRadius: 6,
