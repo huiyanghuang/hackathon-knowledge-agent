@@ -159,7 +159,13 @@ function DecisionPanel() {
       setAlignState(data)
       if (data.running) startPolling()
     }).catch(() => {})
-    return stopPolling
+    // 手动合并/删除/撤销后 GraphView 会派发该事件，整合面板也跟着刷新
+    const onUpdate = () => load()
+    window.addEventListener('align-finished', onUpdate)
+    return () => {
+      stopPolling()
+      window.removeEventListener('align-finished', onUpdate)
+    }
   }, [])
 
   const isRunning = alignState.running

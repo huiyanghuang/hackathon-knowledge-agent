@@ -63,33 +63,54 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
 
-    // 拖拽起点：mousedown 在节点上（仅整合视图+力导向图启用编辑）
+    // 按下源节点 → 记录 src 并高亮（在 draggable:false 下源节点不会粘鼠标，
+    // 用户划到目标节点松手时 mouseup 命中的就是目标）
     chartInstance.current.on('mousedown', params => {
       if (!editable()) return
       if (params.dataType === 'node' && params.data?.id) {
         dragRef.current = {
-          src: { id: params.data.id, name: params.data.name },
+          src: { id: params.data.id, name: params.data.name, dataIndex: params.dataIndex },
           startX: params.event?.offsetX || 0,
           startY: params.event?.offsetY || 0,
         }
+        chartInstance.current.dispatchAction({
+          type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex,
+        })
       }
     })
 
-    // 拖拽终点：mouseup 在另一个节点上 → 弹合并确认
+    // 取消高亮 helper
+    const clearSourceHighlight = () => {
+      const { src } = dragRef.current
+      if (src?.dataIndex != null) {
+        chartInstance.current?.dispatchAction({
+          type: 'downplay', seriesIndex: 0, dataIndex: src.dataIndex,
+        })
+      }
+    }
+
+    // mouseup 在另一个节点上 → 弹合并确认
     chartInstance.current.on('mouseup', params => {
       const { src, startX, startY } = dragRef.current
+      clearSourceHighlight()
       dragRef.current = { src: null, startX: 0, startY: 0 }
       if (!editable() || !src) return
       if (params.dataType !== 'node' || !params.data?.id) return
       if (params.data.id === src.id) return  // 原地松手 → 点击查看，不合并
       const dx = (params.event?.offsetX || 0) - startX
       const dy = (params.event?.offsetY || 0) - startY
-      if (Math.hypot(dx, dy) < 15) return  // 没拖够距离
+      if (Math.hypot(dx, dy) < 8) return  // 没移动够距离视为点击
       setConfirmDlg({
         kind: 'merge',
-        source: src,
+        source: { id: src.id, name: src.name },
         target: { id: params.data.id, name: params.data.name },
       })
+    })
+
+    // 鼠标移出图表也清掉高亮，避免悬空
+    chartInstance.current.getZr().on('mouseleave', () => {
+      clearSourceHighlight()
+      dragRef.current = { src: null, startX: 0, startY: 0 }
     })
 
     // 右键节点 = 删除确认
@@ -404,7 +425,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
               <table style={{ width: '100%', marginTop: 10, fontSize: 13, borderCollapse: 'collapse' }}>
                 <tbody>
                   <tr><td style={helpCell}>🖱️ <b>左键点击</b></td><td style={helpCell}>查看该知识点的定义、章节、来源</td></tr>
-                  <tr><td style={helpCell}>↔️ <b>拖拽节点 A 到节点 B</b></td><td style={helpCell}>合并两个知识点 → 保留定义较完整的版本</td></tr>
+                  <tr><td style={helpCell}>↔️ <b>在 A 按下、划到 B 松手</b></td><td style={helpCell}>合并 A 到 B → 保留定义较完整的版本。源节点会高亮提示</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>右键点击</b></td><td style={helpCell}>删除该知识点（从整合结果中移除）</td></tr>
                   <tr><td style={helpCell}>↶ <b>撤销 / Ctrl+Z</b></td><td style={helpCell}>回滚最近一次手动操作（最多 20 步）</td></tr>
                 </tbody>
@@ -527,7 +548,10 @@ function buildForce(nodes, edges) {
       type: 'graph',
       layout: 'force',
       roam: true,
-      draggable: true,
+      // 关闭原生拖拽：原生拖拽会把源节点粘在鼠标上、永远盖在目标上方，
+      // 导致 mouseup 的 hit-test 永远落在源节点上，目标节点收不到事件。
+      // 关闭后，"按下源节点 → 划到目标节点 → 松手" 的轨迹中 mouseup 命中目标。
+      draggable: false,
       force: { repulsion: 200, gravity: 0.05, edgeLength: [80, 200] },
       lineStyle: { curveness: 0.1 },
       emphasis: { focus: 'adjacency', scale: true },
