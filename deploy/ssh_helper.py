@@ -1,4 +1,11 @@
-"""Tiny SSH helper for Vultr deployment. Usage:
+"""Tiny SSH helper for Vultr deployment.
+
+Required env vars (put in .env, which is gitignored):
+    VULTR_HOST=<server ip>
+    VULTR_USER=root
+    VULTR_PASS=<password>
+
+Usage:
     python -c "from deploy.ssh_helper import sh; print(sh('ls /'))"
 """
 import os
@@ -6,12 +13,17 @@ import sys
 
 import paramiko
 
-HOST = "149.28.235.226"
-USER = "root"
-PASS = os.environ.get("VULTR_PASS", "Y$a6yeRL(qadthzo")
+HOST = os.environ.get("VULTR_HOST")
+USER = os.environ.get("VULTR_USER", "root")
+PASS = os.environ.get("VULTR_PASS")
 
 
 def _client():
+    if not (HOST and PASS):
+        raise RuntimeError(
+            "Missing VULTR_HOST / VULTR_PASS env vars. "
+            "Set them in .env or your shell before using ssh_helper."
+        )
     c = paramiko.SSHClient()
     c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     c.connect(HOST, username=USER, password=PASS, timeout=15)
