@@ -1,0 +1,30 @@
+# 教材数据（不上传到GitHub）
+data/textbooks/*.pdf
+data/textbooks/*.docx
+data/textbooks/*.txt
+data/textbooks/*.md
+*.pdf
+
+# 环境变量
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node
+node_modules/
+src/frontend/dist/
+
+# ChromaDB
+data/chroma/
+
+# IDE
+.vscode/
+.idea/
+*.swp

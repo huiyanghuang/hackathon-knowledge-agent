@@ -1,0 +1,44 @@
+{
+  "processed": 7,
+  "total_chars": 3645225,
+  "total_nodes": 694,
+  "total_edges": 539,
+  "total_chunks": 7320,
+  "textbooks": [
+    {
+      "id": "jiepou",
+      "title": "局部解剖学",
+      "chars": 356786
+    },
+    {
+      "id": "zuzhi",
+      "title": "组织学与胚胎学",
+      "chars": 353281
+    },
+    {
+      "id": "shengli",
+      "title": "生理学",
+      "chars": 676259
+    },
+    {
+      "id": "weisheng",
+      "title": "医学微生物学",
+      "chars": 579109
+    },
+    {
+      "id": "bingli",
+      "title": "病理学",
+      "chars": 593559
+    },
+    {
+      "id": "chuanran",
+      "title": "传染病学",
+      "chars": 651121
+    },
+    {
+      "id": "bingsheng",
+      "title": "病理生理学",
+      "chars": 435110
+    }
+  ]
+}

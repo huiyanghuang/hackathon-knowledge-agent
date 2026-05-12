@@ -1,0 +1,32 @@
+# Build artifacts
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/dist
+src/frontend/dist
+**/.vite
+
+# Local env / IDE
+.env
+.git
+.gitignore
+.vscode
+.idea
+*.swp
+
+# Docs / reports built locally
+report/*.pdf
+
+# Test data — never bake textbooks into the image
+data/textbooks/*.pdf
+data/textbooks/*.docx
+data/textbooks/*.txt
+data/textbooks/*.md
+data/processed/
+data/chroma/
+data/processed_v1_backup/
+
+# Misc
+*.log
+.DS_Store

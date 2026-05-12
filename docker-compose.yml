@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    image: knowledge-integrator:latest
+    container_name: knowledge-integrator
+    ports:
+      # Bind only to loopback so nginx is the public entry point.
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist textbook files, parsed cache, and vector index across rebuilds.
+      - ./data:/app/data
+    restart: unless-stopped

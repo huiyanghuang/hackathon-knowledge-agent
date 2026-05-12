@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>学科知识整合智能体</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; }
+      @media print {
+        body { background: #fff !important; color: #000 !important; }
+        body * { visibility: hidden; }
+        #report-content, #report-content * { visibility: visible; }
+        #report-content {
+          position: absolute; left: 0; top: 0; width: 100%;
+          background: #fff !important; color: #000 !important;
+          border: none !important; padding: 24px !important;
+        }
+        #report-content h2, #report-content h3 { color: #1e293b !important; }
+        #report-content b, #report-content strong { color: #000 !important; }
+        #report-content table, #report-content th, #report-content td {
+          border-color: #cbd5e1 !important;
+        }
+        #report-content th { background: #f1f5f9 !important; }
+        .no-print { display: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
