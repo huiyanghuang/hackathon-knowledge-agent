@@ -21,6 +21,13 @@ const RELATION_LABELS = {
   applies_to: '应用关系',
 }
 
+const RELATION_TIPS = {
+  prerequisite: '前置依赖：学习 B 之前必须先掌握 A。例：动作电位 ← 静息电位',
+  parallel:     '并列关系：同一层级的平行概念。例：有丝分裂 ⇔ 减数分裂',
+  contains:     '包含关系：上位概念包含下位概念。例：免疫系统 ⊃ T 细胞',
+  applies_to:   '应用关系：知识点是另一个的应用场景。例：抗体 → 体液免疫',
+}
+
 const VIEWS = [
   { key: 'force', label: '力导向' },
   { key: 'tree',  label: '树状图' },
@@ -35,6 +42,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
   const dragRef = useRef({ src: null, startX: 0, startY: 0 })
   const modeRef = useRef(mode)
   const viewRef = useRef('force')
+  const shiftRef = useRef(false)  // 全局追踪 Shift 键状态，不依赖 zrender 事件透传
   const [selected, setSelected] = useState(null)
   const [stats, setStats] = useState(null)
   const [searchQ, setSearchQ] = useState('')
@@ -126,7 +134,8 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     zr.on('mousedown', e => {
       if (!editable()) return
-      if (!e.event?.shiftKey) return  // 必须按住 Shift
+      // 必须按住 Shift（全局 ref 兜底，应对 zrender 事件不透传 shiftKey 的版本）
+      if (!shiftRef.current && !e.event?.shiftKey) return
       const node = findNodeAt(e.offsetX, e.offsetY)
       if (!node) return
 
@@ -221,16 +230,27 @@ export default function GraphView({ selectedTextbookId, mode }) {
     }
   }, [])
 
-  // Ctrl+Z 撤销
+  // Ctrl+Z 撤销 + 全局 Shift 状态追踪
   useEffect(() => {
-    const onKey = (e) => {
+    const onKeyDown = (e) => {
+      if (e.key === 'Shift') shiftRef.current = true
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && mode === 'merged') {
         e.preventDefault()
         doUndo()
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const onKeyUp = (e) => {
+      if (e.key === 'Shift') shiftRef.current = false
+    }
+    const onBlur = () => { shiftRef.current = false }  // 窗口失焦兜底
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
   }, [mode])
 
   // 进入整合视图首次 → 弹使用说明
@@ -491,11 +511,12 @@ export default function GraphView({ selectedTextbookId, mode }) {
       {(view === 'force' || view === 'tree') && (
         <div style={{ display: 'flex', gap: 12, padding: '6px 0', fontSize: 11, color: '#64748b', flexShrink: 0 }}>
           {Object.entries(RELATION_COLORS).map(([k, c]) => (
-            <span key={k} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span key={k} title={RELATION_TIPS[k] || ''} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'help' }}>
               <span style={{ width: 16, height: 2, background: c, display: 'inline-block' }} />
               {RELATION_LABELS[k] || k}
             </span>
           ))}
+          <span style={{ color: '#475569', fontSize: 10, marginLeft: 'auto' }}>悬停看说明</span>
         </div>
       )}
 
@@ -522,6 +543,18 @@ export default function GraphView({ selectedTextbookId, mode }) {
               <div style={{ marginTop: 14, padding: 10, background: '#0f172a', borderRadius: 6, fontSize: 12, color: '#94a3b8', borderLeft: '3px solid #6366f1' }}>
                 💡 每次合并/删除前会弹确认对话框，操作后会自动持久化（重启不丢失）。
                 所有手动决策会出现在右侧「整合操作」面板的决策列表里。
+              </div>
+
+              <div style={{ marginTop: 14, fontSize: 13, color: '#cbd5e1' }}>
+                <div style={{ fontWeight: 600, marginBottom: 6 }}>📚 四种知识点关系</div>
+                <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                  <tbody>
+                    <tr><td style={{ ...helpCell, color: '#ef4444', whiteSpace: 'nowrap' }}>前置依赖</td><td style={helpCell}>学 B 前必须先掌握 A。例：动作电位 ← 静息电位</td></tr>
+                    <tr><td style={{ ...helpCell, color: '#6366f1', whiteSpace: 'nowrap' }}>并列关系</td><td style={helpCell}>同一层级的平行概念。例：有丝分裂 ⇔ 减数分裂</td></tr>
+                    <tr><td style={{ ...helpCell, color: '#22c55e', whiteSpace: 'nowrap' }}>包含关系</td><td style={helpCell}>上位概念包含下位概念。例：免疫系统 ⊃ T 细胞</td></tr>
+                    <tr><td style={{ ...helpCell, color: '#f59e0b', whiteSpace: 'nowrap' }}>应用关系</td><td style={helpCell}>知识点是另一个的应用场景。例：抗体 → 体液免疫</td></tr>
+                  </tbody>
+                </table>
               </div>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
