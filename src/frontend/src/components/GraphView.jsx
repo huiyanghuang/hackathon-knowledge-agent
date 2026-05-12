@@ -63,9 +63,14 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
 
-    // Shift+拖拽合并：用 zrender 原生坐标 + getItemLayout 做命中测试，
-    // 避开 ECharts 高层 mouseup 永远命中源节点的问题。
+    // Shift+拖拽合并。关键设计：
+    //   1. mousedown 时把源节点的 zrender draggable 临时设为 false，
+    //      让源节点不跟随鼠标 → 力布局没扰动 → 邻居不会被挤开
+    //   2. 用自绘的黄色虚线 (echarts.graphic.Line) 从源节点拉到光标
+    //      作为视觉反馈，松手时移除
+    //   3. 用 getItemLayout + symbolSize 做坐标命中测试找目标节点
     const zr = chartInstance.current.getZr()
+    let dragLine = null  // 当前虚线指示器
 
     const findNodeAt = (px, py, excludeId) => {
       try {
@@ -90,6 +95,17 @@ export default function GraphView({ selectedTextbookId, mode }) {
       } catch { return null }
     }
 
+    const removeDragLine = () => {
+      if (dragLine) { zr.remove(dragLine); dragLine = null }
+    }
+
+    const restoreSourceDraggable = () => {
+      const { src } = dragRef.current
+      if (src?.el) {
+        src.el.draggable = src.origDraggable !== false
+      }
+    }
+
     const clearHighlights = () => {
       const c = chartInstance.current
       if (!c) return
@@ -106,22 +122,47 @@ export default function GraphView({ selectedTextbookId, mode }) {
       if (!e.event?.shiftKey) return  // 必须按住 Shift
       const node = findNodeAt(e.offsetX, e.offsetY)
       if (!node) return
-      // 阻止 ECharts 原生 roam/drag 在 shift 模式下生效
+
+      // 锁住源节点，禁止 zrender/ECharts 拖动它（关键：阻止邻居被挤开）
+      const data = chartInstance.current.getModel().getSeriesByIndex(0).getData()
+      const el = data.getItemGraphicEl(node.dataIndex)
+      const origDraggable = el ? el.draggable : true
+      if (el) el.draggable = false
+
+      const srcLayout = data.getItemLayout(node.dataIndex)
+      const srcX = srcLayout?.x ?? e.offsetX
+      const srcY = srcLayout?.y ?? e.offsetY
+
+      // 阻止 roam（画布平移）
       e.event.preventDefault?.()
       e.event.stopPropagation?.()
+
       dragRef.current = {
-        src: node, tgt: null,
-        startX: e.offsetX, startY: e.offsetY,
+        src: { ...node, el, origDraggable, x: srcX, y: srcY },
+        tgt: null, startX: e.offsetX, startY: e.offsetY,
       }
       chartInstance.current.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: node.dataIndex })
+
+      // 自绘提示虚线
+      dragLine = new echarts.graphic.Line({
+        shape: { x1: srcX, y1: srcY, x2: e.offsetX, y2: e.offsetY },
+        style: { stroke: '#fbbf24', lineWidth: 2, lineDash: [6, 4], opacity: 0.9 },
+        silent: true, z: 10000,
+      })
+      zr.add(dragLine)
     })
 
     zr.on('mousemove', e => {
       const { src, tgt } = dragRef.current
       if (!src) return
+
+      // 更新虚线终点
+      if (dragLine) {
+        dragLine.attr({ shape: { x1: src.x, y1: src.y, x2: e.offsetX, y2: e.offsetY } })
+      }
+
       const target = findNodeAt(e.offsetX, e.offsetY, src.id)
       if (target?.id === tgt?.id) return  // 同一个目标不重复高亮
-      // 切换高亮
       if (tgt?.dataIndex != null) {
         chartInstance.current.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
       }
@@ -133,6 +174,8 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     zr.on('mouseup', () => {
       const { src, tgt } = dragRef.current
+      removeDragLine()
+      restoreSourceDraggable()
       clearHighlights()
       dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
       if (!src || !tgt) return
@@ -144,6 +187,8 @@ export default function GraphView({ selectedTextbookId, mode }) {
     })
 
     zr.on('mouseleave', () => {
+      removeDragLine()
+      restoreSourceDraggable()
       clearHighlights()
       dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
     })
@@ -462,7 +507,7 @@ export default function GraphView({ selectedTextbookId, mode }) {
                   <tr><td style={helpCell}>🖱️ <b>左键点击节点</b></td><td style={helpCell}>查看该知识点的定义、章节、来源</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>左键拖拽节点</b></td><td style={helpCell}>调整节点位置（动态布局，不触发合并）</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>左键拖拽空白处</b></td><td style={helpCell}>平移整个画布；滚轮缩放</td></tr>
-                  <tr><td style={helpCell}>⇧ <b>Shift+拖拽 A → B</b></td><td style={helpCell}>合并 A 到 B。按下时 A 高亮，划过 B 时 B 也高亮提示，松手弹确认</td></tr>
+                  <tr><td style={helpCell}>⇧ <b>Shift+拖拽 A → B</b></td><td style={helpCell}>合并 A 到 B。按下时 A 高亮且保持原位（其他节点不会被挤开），鼠标拉出一条黄色虚线指向光标，划过 B 时 B 也高亮，松手 → 屏幕中央弹"🔀 合并知识点"确认窗口</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>右键点击节点</b></td><td style={helpCell}>删除该知识点（从整合结果中移除）</td></tr>
                   <tr><td style={helpCell}>↶ <b>撤销 / Ctrl+Z</b></td><td style={helpCell}>回滚最近一次手动操作（最多 20 步）</td></tr>
                 </tbody>
