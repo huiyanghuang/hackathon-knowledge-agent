@@ -17,7 +17,7 @@ from core.llm import chat
 from models.schemas import KnowledgeEdge, KnowledgeNode, MergeDecision
 from services.vector_store import _embed_texts as _embed_batch
 
-LLM_CONCURRENCY = 32
+LLM_CONCURRENCY = 64  # Gemini 4000 RPM 限速，64 并发 × ~3s/req ≈ 1280 RPM 安全余量
 
 # 标准化用：去掉空白/标点/全半角括号，转小写
 _NORM_RE = re.compile(r"[\s\(\)（）\[\]【】《》、，,。.;；:：·\-_/]+")

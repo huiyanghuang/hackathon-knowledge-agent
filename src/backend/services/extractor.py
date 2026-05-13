@@ -1,13 +1,18 @@
 """
 LLM-based knowledge extraction from textbook chapters.
-One LLM call per chapter to avoid context length issues.
+One LLM call per chapter to avoid context length issues; chapters run in parallel.
 """
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from core.llm import chat
 from models.schemas import Chapter, KnowledgeEdge, KnowledgeNode
+
+# Gemini 3.1 Flash Lite 限速 4000 RPM。每章一次调用，每次 25-50s。
+# 24 并发 × 1.5 req/min/线程 ≈ 36 RPM，远低于上限但保险。
+EXTRACT_CONCURRENCY = 24
 
 EXTRACT_PROMPT = """你是医学教材知识图谱构建专家。请从下面章节内容中提取**医学知识点**和它们之间的关系。
 
@@ -149,15 +154,38 @@ def extract_textbook_knowledge(
     textbook_id: str,
     textbook_name: str,
     chapters: list[Chapter],
+    progress_cb=None,
 ) -> tuple[list[KnowledgeNode], list[KnowledgeEdge]]:
+    """并发抽取每章。保持章节在结果中的原顺序（按 chapter.page_start 排序）。"""
+    valid_chapters = [c for c in chapters if c.char_count >= 100]
+    total = len(valid_chapters)
+    if total == 0:
+        return [], []
+
+    # 按章节索引收集结果，最后按原顺序合并
+    results: dict[int, tuple[list[KnowledgeNode], list[KnowledgeEdge]]] = {}
+    done = [0]
+
+    def _worker(idx: int, ch: Chapter):
+        nodes, edges = extract_chapter_knowledge(ch, textbook_id, textbook_name)
+        results[idx] = (nodes, edges)
+        done[0] += 1
+        if progress_cb:
+            progress_cb(done[0], total, ch.title)
+
+    with ThreadPoolExecutor(max_workers=EXTRACT_CONCURRENCY) as ex:
+        futures = [ex.submit(_worker, i, c) for i, c in enumerate(valid_chapters)]
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                print(f"[extractor] chapter worker failed: {e}")
+
     all_nodes: list[KnowledgeNode] = []
     all_edges: list[KnowledgeEdge] = []
-
-    for chapter in chapters:
-        if chapter.char_count < 100:
-            continue
-        nodes, edges = extract_chapter_knowledge(chapter, textbook_id, textbook_name)
-        all_nodes.extend(nodes)
-        all_edges.extend(edges)
-
+    for i in range(total):
+        if i in results:
+            nodes, edges = results[i]
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
     return all_nodes, all_edges

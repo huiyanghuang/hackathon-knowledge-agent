@@ -19,7 +19,7 @@ from core.config import settings
 
 EMBED_MODEL = "models/gemini-embedding-001"
 EMBED_BATCH = 20      # API request size
-EMBED_CONCURRENCY = 4 # parallel batches (paid tier allows 3000 RPM, this is well under)
+EMBED_CONCURRENCY = 16  # Gemini Embedding 限速 3K RPM，16 并发约 480 RPM 安全
 
 
 def _embed_one_batch(batch: list[str]) -> list[list[float]]:

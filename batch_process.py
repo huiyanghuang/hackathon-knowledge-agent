@@ -57,9 +57,12 @@ def process_one(fname, tid, title):
     tb = parse_pdf(fpath, tid)
     print(f"  {tb.total_pages}页 {tb.total_chars}字 {len(tb.chapters)}块，耗时{time.time()-t0:.1f}s")
 
-    print(f"  提取知识点（{len(tb.chapters)}次LLM调用）...")
+    valid_count = sum(1 for c in tb.chapters if c.char_count >= 100)
+    print(f"  提取知识点（{valid_count} 章并发 LLM 调用）...")
     t1 = time.time()
-    nodes, edges = extract_textbook_knowledge(tid, title, tb.chapters)
+    def _on_progress(done, total, ch_title):
+        print(f"    [{done:>3}/{total}] {ch_title[:30]}", flush=True)
+    nodes, edges = extract_textbook_knowledge(tid, title, tb.chapters, progress_cb=_on_progress)
     print(f"  提取到 {len(nodes)} 节点，{len(edges)} 关系，耗时{time.time()-t1:.1f}s")
 
     # Save after extraction so re-runs skip LLM even if RAG indexing fails
