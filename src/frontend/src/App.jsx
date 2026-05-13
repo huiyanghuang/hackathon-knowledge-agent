@@ -131,7 +131,7 @@ function DecisionPanel() {
   const labelOf = (d) => {
     const node = nodeMap[d.result_node] || nodeMap[d.affected_nodes?.[0]]
     if (node?.name) return node.name
-    return nameFromReason(d.reason) || '(节点已不可见)'
+    return nameFromReason(d.reason) || '(已被 30% 压缩排除)'
   }
   const isManual = (d) => d.decision_id?.startsWith('manual_')
 
