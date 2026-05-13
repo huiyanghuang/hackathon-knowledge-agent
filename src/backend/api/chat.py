@@ -76,10 +76,11 @@ def chat(req: ChatRequest):
         reply = multi_turn(history, system=SYSTEM)
     except Exception as e:
         emsg = str(e)
-        if "timeout" in emsg.lower() or "deadline" in emsg.lower() or "524" in emsg:
+        elow = emsg.lower()
+        if "timeout" in elow or "deadline" in elow or "524" in emsg or "499" in emsg or "cancel" in elow:
             reply = "⏱ AI 服务响应超时（Gemini 当前繁忙）。请稍后再试，或换个角度提问。"
         elif "429" in emsg:
-            reply = "🚦 触发 API 限速（48 次/分钟）。请稍等几秒再试。"
+            reply = "🚦 触发 API 限速。请稍等几秒再试。"
         else:
             reply = f"❌ 请求失败：{emsg[:200]}"
         # 失败时不把这条 user 消息留在历史里，避免下次又触发

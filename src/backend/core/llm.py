@@ -20,10 +20,11 @@ def _record_usage(resp, full: str, text: str):
     stats.record_llm(in_t, out_t, full, text)
 
 
-def chat(prompt: str, system: str = "", timeout: int = 30, max_attempts: int = 2) -> str:
+def chat(prompt: str, system: str = "", timeout: int = 45, max_attempts: int = 2) -> str:
     """Single-turn call with bounded timeout + retry.
 
-    默认 30s × 2 次 + 2s 退避 ≈ 62s 上限，避开 Cloudflare 100s 切断。
+    默认 45s × 2 次 + 2s 退避 ≈ 92s 上限，刚好避开 Cloudflare 100s 切断。
+    经实测 Gemini 3.1 Flash Lite 单次调用 23-48s 是常态，30s 太紧。
     批处理（如 aligner._llm_judge 并发判定）可传 max_attempts=4 放宽。
     """
     full = f"{system}\n\n{prompt}" if system else prompt
@@ -37,7 +38,7 @@ def chat(prompt: str, system: str = "", timeout: int = 30, max_attempts: int = 2
         except Exception as e:
             last_err = e
             msg = str(e).lower()
-            transient = "429" in msg or "503" in msg or "504" in msg or "timeout" in msg or "deadline" in msg
+            transient = "429" in msg or "499" in msg or "503" in msg or "504" in msg or "timeout" in msg or "deadline" in msg or "cancel" in msg
             if transient and attempt < max_attempts - 1:
                 time.sleep(2 ** attempt)  # 1, 2, 4 s
                 continue
@@ -47,8 +48,8 @@ def chat(prompt: str, system: str = "", timeout: int = 30, max_attempts: int = 2
 
 def multi_turn(messages: list[dict], system: str = "") -> str:
     """
-    Multi-turn call with 30s per-attempt timeout + 1 retry.
-    总耗时上限 ~62s，控制在 Cloudflare 100s 切断之前。
+    Multi-turn call with 45s per-attempt timeout + 1 retry.
+    总耗时上限 ~92s，控制在 Cloudflare 100s 切断之前。
     messages: list of {"role": "user"|"model", "parts": [str]}
     """
     model = genai.GenerativeModel(settings.llm_model, system_instruction=system or None)
@@ -59,14 +60,14 @@ def multi_turn(messages: list[dict], system: str = "") -> str:
     for attempt in range(2):
         try:
             gc = model.start_chat(history=history)
-            resp = gc.send_message(last, request_options={"timeout": 30})
+            resp = gc.send_message(last, request_options={"timeout": 45})
             text = resp.text.strip()
             _record_usage(resp, str(history) + last, text)
             return text
         except Exception as e:
             last_err = e
             msg = str(e).lower()
-            if attempt == 0 and ("429" in msg or "503" in msg or "504" in msg or "timeout" in msg or "deadline" in msg):
+            if attempt == 0 and ("429" in msg or "499" in msg or "503" in msg or "504" in msg or "timeout" in msg or "deadline" in msg or "cancel" in msg):
                 time.sleep(2)
                 continue
             raise
