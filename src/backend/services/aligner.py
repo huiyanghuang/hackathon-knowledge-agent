@@ -44,7 +44,8 @@ def _llm_judge(node_a: KnowledgeNode, node_b: KnowledgeNode) -> tuple[bool, str]
         name_b=node_b.name, def_b=node_b.definition,
     )
     try:
-        raw = chat(prompt)
+        # 批处理：放宽到 4 次重试 + 60s/次，对齐准确性优先于响应时间
+        raw = chat(prompt, timeout=60, max_attempts=4)
         if "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
             if raw.startswith("json"):

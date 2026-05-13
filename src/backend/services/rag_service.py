@@ -112,7 +112,13 @@ def query(question: str, textbook_ids: list[str] | None = None) -> RAGResponse:
     try:
         answer = chat(prompt)
     except Exception as e:
-        answer = f"生成回答时发生错误：{e}"
+        emsg = str(e)
+        if "timeout" in emsg.lower() or "deadline" in emsg.lower() or "524" in emsg:
+            answer = "⏱ AI 生成回答超时。可能上下文过长或 Gemini 当前繁忙。下方仍可看到检索到的原文，请稍后重试或换种问法。"
+        elif "429" in emsg:
+            answer = "🚦 触发 API 限速（48 次/分钟）。请稍等几秒再试。"
+        else:
+            answer = f"❌ 生成回答失败：{emsg[:200]}"
 
     return RAGResponse(answer=answer, citations=citations)
 

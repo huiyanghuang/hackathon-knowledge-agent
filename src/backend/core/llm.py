@@ -20,20 +20,25 @@ def _record_usage(resp, full: str, text: str):
     stats.record_llm(in_t, out_t, full, text)
 
 
-def chat(prompt: str, system: str = "") -> str:
-    """Single-turn call with retry on transient errors. Returns text."""
+def chat(prompt: str, system: str = "", timeout: int = 30, max_attempts: int = 2) -> str:
+    """Single-turn call with bounded timeout + retry.
+
+    默认 30s × 2 次 + 2s 退避 ≈ 62s 上限，避开 Cloudflare 100s 切断。
+    批处理（如 aligner._llm_judge 并发判定）可传 max_attempts=4 放宽。
+    """
     full = f"{system}\n\n{prompt}" if system else prompt
     last_err: Exception | None = None
-    for attempt in range(4):
+    for attempt in range(max_attempts):
         try:
-            resp = _model().generate_content(full)
+            resp = _model().generate_content(full, request_options={"timeout": timeout})
             text = resp.text.strip()
             _record_usage(resp, full, text)
             return text
         except Exception as e:
             last_err = e
-            msg = str(e)
-            if ("429" in msg or "503" in msg or "504" in msg) and attempt < 3:
+            msg = str(e).lower()
+            transient = "429" in msg or "503" in msg or "504" in msg or "timeout" in msg or "deadline" in msg
+            if transient and attempt < max_attempts - 1:
                 time.sleep(2 ** attempt)  # 1, 2, 4 s
                 continue
             raise
