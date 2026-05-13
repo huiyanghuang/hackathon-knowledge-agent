@@ -39,10 +39,10 @@ export default function GraphView({ selectedTextbookId, mode }) {
   const chartRef = useRef()
   const chartInstance = useRef()
   const dataRef = useRef({ nodes: [], edges: [] })
-  const dragRef = useRef({ src: null, startX: 0, startY: 0 })
   const modeRef = useRef(mode)
   const viewRef = useRef('force')
-  const shiftRef = useRef(false)  // 全局追踪 Shift 键状态，不依赖 zrender 事件透传
+  const mergeModeRef = useRef(false)  // 点选合并模式开关，存 ref 供 zrender 回调读取
+  const mergeSrcRef = useRef(null)    // 当前已选源节点 {id,name,dataIndex}
   const [selected, setSelected] = useState(null)
   const [stats, setStats] = useState(null)
   const [searchQ, setSearchQ] = useState('')
@@ -53,7 +53,8 @@ export default function GraphView({ selectedTextbookId, mode }) {
   const [showHelp, setShowHelp] = useState(false)
   const [undoCount, setUndoCount] = useState(0)
   const [toast, setToast] = useState(null)
-  const [shiftHeld, setShiftHeld] = useState(false)  // UI 实时显示，方便用户确认监听器在工作
+  const [mergeMode, setMergeMode] = useState(false)  // 点选合并模式（UI 状态）
+  const [mergeSrc, setMergeSrc] = useState(null)     // 已选源节点（UI 状态）
   const helpShownRef = useRef(false)  // 本会话首次进入 merged 时弹一次
 
   const showToast = (msg, kind = 'info') => {
@@ -74,111 +75,42 @@ export default function GraphView({ selectedTextbookId, mode }) {
 
     // 点击节点 = 查看详情
     chartInstance.current.on('click', params => {
-      if (params.dataType === 'node' && params.data?.definition) setSelected(params.data)
+      if (params.dataType !== 'node' || !params.data?.id) return
+      const c = chartInstance.current
+      // 普通模式 = 查看详情
+      if (!mergeModeRef.current) {
+        if (params.data.definition) setSelected(params.data)
+        return
+      }
+      // 合并模式分支
+      const cur = mergeSrcRef.current
+      if (!cur) {
+        // 第一次点 → 选源节点
+        const src = { id: params.data.id, name: params.data.name, dataIndex: params.dataIndex }
+        mergeSrcRef.current = src
+        setMergeSrc(src)
+        c.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
+      } else if (cur.id === params.data.id) {
+        // 再点同一节点 → 取消
+        c.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: cur.dataIndex })
+        mergeSrcRef.current = null
+        setMergeSrc(null)
+      } else {
+        // 点不同节点 → 弹合并确认
+        c.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: cur.dataIndex })
+        const tgt = { id: params.data.id, name: params.data.name }
+        mergeSrcRef.current = null
+        setMergeSrc(null)
+        setConfirmDlg({ kind: 'merge', source: { id: cur.id, name: cur.name }, target: tgt })
+      }
     })
 
     const editable = () => modeRef.current === 'merged' && viewRef.current === 'force'
-
-    // Shift+鼠标合并。设计要点：
-    //   * 节点 draggable=false（在 buildForce 里）→ ECharts 不会移动任何节点 →
-    //     力布局始终在平衡态，邻居不会被挤开。源节点保持原位，光标可以自由
-    //     移到目标节点上方与其重合。
-    //   * 通过 cancelBubble 拦掉 roam 的 mousedown，shift 状态下不平移画布。
-    //   * 源节点 ← chart.on(mousedown)；目标 ← chart.on(mouseover/mouseout)。
-    //   * 虚线起点用 mousedown 鼠标坐标（≈节点中心）；终点跟随 mousemove。
-    const chart = chartInstance.current
-    const zr = chart.getZr()
-    let dragLine = null
-
-    const cleanup = () => {
-      const { src, tgt } = dragRef.current
-      if (dragLine) { zr.remove(dragLine); dragLine = null }
-      if (src?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: src.dataIndex })
-      if (tgt?.dataIndex != null) chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
-      dragRef.current = { src: null, tgt: null, startX: 0, startY: 0 }
-    }
-
-    // ① shift 状态下拦截 mousedown 阻止 roam 平移画布
-    zr.on('mousedown', e => {
-      if (!editable()) return
-      if (!shiftRef.current && !e.event?.shiftKey) return
-      e.event?.preventDefault?.()
-      e.cancelBubble = true
-    })
-
-    // ② 源节点 via chart.on(mousedown)
-    chart.on('mousedown', params => {
-      if (!editable()) return
-      const shifted = shiftRef.current || params.event?.event?.shiftKey
-      if (!shifted) return
-      if (params.dataType !== 'node' || !params.data?.id) return
-
-      // 鼠标按下时光标位置 ≈ 节点中心，用作虚线起点
-      const srcX = params.event?.offsetX ?? params.event?.event?.offsetX ?? 0
-      const srcY = params.event?.offsetY ?? params.event?.event?.offsetY ?? 0
-
-      dragRef.current = {
-        src: {
-          id: params.data.id, name: params.data.name,
-          dataIndex: params.dataIndex,
-          x: srcX, y: srcY,
-        },
-        tgt: null, startX: 0, startY: 0,
-      }
-      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
-
-      dragLine = new echarts.graphic.Line({
-        shape: { x1: srcX, y1: srcY, x2: srcX, y2: srcY },
-        style: { stroke: '#fbbf24', lineWidth: 2, lineDash: [6, 4], opacity: 0.9 },
-        silent: true, z: 10000,
-      })
-      zr.add(dragLine)
-    })
-
-    // ③ 目标节点 via mouseover（ECharts 自己负责命中）
-    chart.on('mouseover', params => {
-      const { src, tgt } = dragRef.current
-      if (!src) return
-      if (params.dataType !== 'node' || !params.data?.id) return
-      if (params.data.id === src.id) return
-      if (tgt && tgt.id !== params.data.id) {
-        chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
-      }
-      chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: params.dataIndex })
-      dragRef.current.tgt = { id: params.data.id, name: params.data.name, dataIndex: params.dataIndex }
-    })
-
-    chart.on('mouseout', params => {
-      const { src, tgt } = dragRef.current
-      if (!src || !tgt) return
-      if (params.dataType !== 'node') return
-      if (params.data?.id !== tgt.id) return
-      chart.dispatchAction({ type: 'downplay', seriesIndex: 0, dataIndex: tgt.dataIndex })
-      dragRef.current.tgt = null
-    })
-
-    // ④ 虚线终点跟随光标
-    zr.on('mousemove', e => {
-      if (!dragRef.current.src || !dragLine) return
-      dragLine.attr({ shape: {
-        x1: dragRef.current.src.x, y1: dragRef.current.src.y,
-        x2: e.offsetX, y2: e.offsetY,
-      }})
-    })
-
-    // ⑤ 松手 → 弹对话框
-    zr.on('mouseup', () => {
-      const { src, tgt } = dragRef.current
-      cleanup()
-      if (!src || !tgt) return
-      setConfirmDlg({
-        kind: 'merge',
-        source: { id: src.id, name: src.name },
-        target: { id: tgt.id, name: tgt.name },
-      })
-    })
-
-    zr.on('mouseleave', cleanup)
+    // 点选合并模式：避开所有原生 drag/roam 冲突。
+    //   * 第一次点节点 = 选源（高亮）
+    //   * 再点同一节点 = 取消（downplay）
+    //   * 点另一节点 = 弹合并对话框
+    //   * 普通模式 = 点节点查看详情
 
     // 右键节点 = 删除确认
     chartInstance.current.on('contextmenu', params => {
@@ -201,36 +133,24 @@ export default function GraphView({ selectedTextbookId, mode }) {
     }
   }, [])
 
-  // Ctrl+Z 撤销 + 全局 Shift 状态追踪
+  // Ctrl+Z 撤销 + ESC 取消已选源节点
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (e.key === 'Shift') {
-        shiftRef.current = true
-        setShiftHeld(true)
-      }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && mode === 'merged') {
         e.preventDefault()
         doUndo()
+        return
       }
-    }
-    const onKeyUp = (e) => {
-      if (e.key === 'Shift') {
-        shiftRef.current = false
-        setShiftHeld(false)
+      if (e.key === 'Escape' && mergeSrcRef.current && chartInstance.current) {
+        chartInstance.current.dispatchAction({
+          type: 'downplay', seriesIndex: 0, dataIndex: mergeSrcRef.current.dataIndex,
+        })
+        mergeSrcRef.current = null
+        setMergeSrc(null)
       }
-    }
-    const onBlur = () => {
-      shiftRef.current = false
-      setShiftHeld(false)
     }
     window.addEventListener('keydown', onKeyDown)
-    window.addEventListener('keyup', onKeyUp)
-    window.addEventListener('blur', onBlur)
-    return () => {
-      window.removeEventListener('keydown', onKeyDown)
-      window.removeEventListener('keyup', onKeyUp)
-      window.removeEventListener('blur', onBlur)
-    }
+    return () => window.removeEventListener('keydown', onKeyDown)
   }, [mode])
 
   // 进入整合视图首次 → 弹使用说明
@@ -402,14 +322,32 @@ export default function GraphView({ selectedTextbookId, mode }) {
         {mode === 'merged' && (
           <>
             {view === 'force' && (
-              <span title={shiftHeld ? 'Shift 已按下，可拖拽合并' : '按住 Shift 进入合并模式'} style={{
-                fontSize: 11, padding: '4px 8px',
-                background: shiftHeld ? '#fbbf24' : '#1e293b',
-                color: shiftHeld ? '#0f1117' : '#475569',
-                border: '1px solid ' + (shiftHeld ? '#fbbf24' : '#334155'),
-                borderRadius: 6, fontWeight: shiftHeld ? 700 : 400,
-                transition: 'all 0.1s',
-              }}>⇧ {shiftHeld ? '已按下' : '未按'}</span>
+              <button
+                onClick={() => {
+                  // 切换合并模式时清掉已选源
+                  if (mergeSrcRef.current && chartInstance.current) {
+                    chartInstance.current.dispatchAction({
+                      type: 'downplay', seriesIndex: 0, dataIndex: mergeSrcRef.current.dataIndex,
+                    })
+                  }
+                  mergeSrcRef.current = null
+                  setMergeSrc(null)
+                  setMergeMode(m => {
+                    const next = !m
+                    mergeModeRef.current = next
+                    return next
+                  })
+                }}
+                title={mergeMode ? '点击关闭合并模式' : '点击进入合并模式（再点节点会合并而非看详情）'}
+                style={{
+                  background: mergeMode ? '#fbbf24' : '#1e293b',
+                  color: mergeMode ? '#0f1117' : '#94a3b8',
+                  border: '1px solid ' + (mergeMode ? '#fbbf24' : '#334155'),
+                  borderRadius: 6, padding: '5px 10px', fontSize: 12,
+                  cursor: 'pointer', fontWeight: mergeMode ? 700 : 400,
+                  transition: 'all 0.1s',
+                }}
+              >🔗 合并模式{mergeMode ? ' ✓' : ''}</button>
             )}
             <button onClick={doUndo} disabled={undoCount === 0} title="Ctrl+Z" style={{
               background: undoCount > 0 ? '#1e293b' : '#0f1117',
@@ -437,7 +375,49 @@ export default function GraphView({ selectedTextbookId, mode }) {
       )}
 
       <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-        <div ref={chartRef} style={{ position: 'absolute', inset: 0 }} />
+        <div ref={chartRef} style={{
+          position: 'absolute', inset: 0,
+          cursor: mergeMode ? 'crosshair' : 'default',
+        }} />
+
+        {/* 合并模式引导横幅 */}
+        {mergeMode && mode === 'merged' && view === 'force' && (
+          <div style={{
+            position: 'absolute', top: 8, left: 8, right: 8,
+            background: 'linear-gradient(90deg, #fbbf2433, #fbbf2411)',
+            border: '1px solid #fbbf24', borderRadius: 8,
+            padding: '8px 12px', fontSize: 13, color: '#fef3c7',
+            zIndex: 15, display: 'flex', alignItems: 'center', gap: 8,
+            boxShadow: '0 2px 12px #fbbf2422',
+          }}>
+            <span style={{ fontSize: 16 }}>🔗</span>
+            {!mergeSrc ? (
+              <span><b>合并模式</b>：请点击要合并的<b>第一个</b>知识点</span>
+            ) : (
+              <span>
+                已选 <b style={{ color: '#fbbf24' }}>「{mergeSrc.name}」</b>，请点击要<b>合并到</b>的目标节点
+                <span style={{ marginLeft: 12, color: '#fef3c7aa', fontSize: 11 }}>
+                  （再点同一节点或按 ESC 取消）
+                </span>
+              </span>
+            )}
+            <button onClick={() => {
+              if (mergeSrcRef.current && chartInstance.current) {
+                chartInstance.current.dispatchAction({
+                  type: 'downplay', seriesIndex: 0, dataIndex: mergeSrcRef.current.dataIndex,
+                })
+              }
+              mergeSrcRef.current = null
+              setMergeSrc(null)
+              setMergeMode(false)
+              mergeModeRef.current = false
+            }} style={{
+              marginLeft: 'auto', background: 'transparent',
+              border: '1px solid #fbbf2455', borderRadius: 4,
+              color: '#fef3c7', padding: '2px 8px', fontSize: 11, cursor: 'pointer',
+            }}>退出</button>
+          </div>
+        )}
 
         {graphLoading && (
           <div style={{
@@ -523,9 +503,9 @@ export default function GraphView({ selectedTextbookId, mode }) {
               <table style={{ width: '100%', marginTop: 10, fontSize: 13, borderCollapse: 'collapse' }}>
                 <tbody>
                   <tr><td style={helpCell}>🖱️ <b>左键点击节点</b></td><td style={helpCell}>查看该知识点的定义、章节、来源</td></tr>
-                  <tr><td style={helpCell}>🖱️ <b>左键拖拽节点</b></td><td style={helpCell}>调整节点位置（动态布局，不触发合并）</td></tr>
+                  <tr><td style={helpCell}>🖱️ <b>左键拖拽节点</b></td><td style={helpCell}>调整节点位置</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>左键拖拽空白处</b></td><td style={helpCell}>平移整个画布；滚轮缩放</td></tr>
-                  <tr><td style={helpCell}>⇧ <b>Shift+拖拽 A → B</b></td><td style={helpCell}>合并 A 到 B。按下时 A 高亮且保持原位（其他节点不会被挤开），鼠标拉出一条黄色虚线指向光标，划过 B 时 B 也高亮，松手 → 屏幕中央弹"🔀 合并知识点"确认窗口</td></tr>
+                  <tr><td style={helpCell}>🔗 <b>合并模式（工具栏按钮）</b></td><td style={helpCell}>开启后：第 1 次点节点 = 选源（高亮）；第 2 次点别的节点 = 弹"🔀 合并知识点"确认窗口；再点同一节点 / ESC = 取消选择</td></tr>
                   <tr><td style={helpCell}>🖱️ <b>右键点击节点</b></td><td style={helpCell}>删除该知识点（从整合结果中移除）</td></tr>
                   <tr><td style={helpCell}>↶ <b>撤销 / Ctrl+Z</b></td><td style={helpCell}>回滚最近一次手动操作（最多 20 步）</td></tr>
                 </tbody>
@@ -659,11 +639,8 @@ function buildForce(nodes, edges) {
     series: [{
       type: 'graph',
       layout: 'force',
-      roam: true,
-      // 关掉原生拖拽：原生拖拽会让源节点被力布局当作扰动源，
-      // 推开周围所有邻居，导致用户无法把它"拉到"目标节点上重合。
-      // 合并通过 Shift+鼠标移动 实现，用 zr cancelBubble 拦截 roam。
-      draggable: false,
+      roam: true,           // 滚轮缩放 + 空白处拖拽平移
+      draggable: true,      // 节点可手动拖动调整位置
       force: { repulsion: 200, gravity: 0.05, edgeLength: [80, 200] },
       lineStyle: { curveness: 0.1 },
       emphasis: { focus: 'adjacency', scale: true },
