@@ -35,6 +35,8 @@ export const ragStatus = () => axios.get(`${BASE}/rag/status`)
 export const chat = (message, sessionId = 'default') =>
   axios.post(`${BASE}/chat/`, { message, session_id: sessionId })
 export const getChatHistory = sessionId => axios.get(`${BASE}/chat/history/${sessionId}`)
+export const clearChatHistory = (sessionId = 'default') =>
+  axios.delete(`${BASE}/chat/history/${sessionId}`)
 
 export const getTokenStats = () => axios.get(`${BASE}/stats/`)
 export const resetTokenStats = () => axios.post(`${BASE}/stats/reset`)

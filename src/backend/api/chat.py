@@ -1,8 +1,16 @@
-"""Multi-turn teacher dialogue for iterating on integration decisions."""
+"""Stateless single-turn teacher dialogue.
+
+服务器仍把每轮 user/assistant 消息存进 _sessions（供前端 GET /history 拉
+作日志展示），但每次 LLM 调用只发 当前问题 + 召回到的决策上下文，
+不再带历史。这样：
+  * 响应稳定（prompt 长度不随会话增长）
+  * 不会因为历史累积慢慢撞 Cloudflare 100s 切断
+  * 用户仍能看到完整对话历史
+"""
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from core.llm import multi_turn
+from core.llm import chat as llm_chat
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -40,12 +48,9 @@ def chat(req: ChatRequest):
     stats = graph_mod._stats or {}
     decisions = graph_mod._decisions or []
 
-    # 关键词召回：从决策 reason 中找跟用户问题相关的，优先放进 context
-    # （比通用"前10条"更有针对性，且 prompt 不会爆炸）
-    msg = req.message
-    # 截取用户消息里 2 个字以上的中文/字母片段作为候选关键词
+    # 关键词召回：从决策 reason 中找跟用户问题相关的
     import re
-    tokens = [t for t in re.findall(r'[一-鿿]{2,}|[A-Za-z]{3,}', msg) if t]
+    tokens = [t for t in re.findall(r'[一-鿿]{2,}|[A-Za-z]{3,}', req.message) if t]
 
     relevant = []
     for d in decisions:
@@ -55,8 +60,6 @@ def chat(req: ChatRequest):
             relevant.append(d)
         if len(relevant) >= 5:
             break
-
-    # 没召回到就退化为前3条 merge 决策（最有信息量），避免空 context
     if not relevant:
         relevant = [d for d in decisions if d.action == 'merge'][:3]
 
@@ -65,15 +68,15 @@ def chat(req: ChatRequest):
     else:
         stats_lines = "  （尚未运行整合，无统计信息）"
 
-    context = f"\n\n[当前整合状态]\n{stats_lines}\n\n[相关决策]\n"
+    context = f"[当前整合状态]\n{stats_lines}\n\n[相关决策]\n"
     for d in relevant:
         context += f"- {d.decision_id} ({d.action}, 置信度 {d.confidence:.2f}): {d.reason}\n"
 
-    user_content = req.message + (context if not history else "")
-    history.append({"role": "user", "parts": [user_content]})
+    # 单轮调用：每次只发当前问题 + 召回上下文，不带历史
+    prompt = f"{context}\n\n[用户问题]\n{req.message}"
 
     try:
-        reply = multi_turn(history, system=SYSTEM)
+        reply = llm_chat(prompt, system=SYSTEM)
     except Exception as e:
         emsg = str(e)
         elow = emsg.lower()
@@ -83,10 +86,13 @@ def chat(req: ChatRequest):
             reply = "🚦 触发 API 限速。请稍等几秒再试。"
         else:
             reply = f"❌ 请求失败：{emsg[:200]}"
-        # 失败时不把这条 user 消息留在历史里，避免下次又触发
-        history.pop()
+        # 失败时仍记入历史（让用户看到尝试过什么 + 错误），但不执行 ACTION
+        history.append({"role": "user", "parts": [req.message]})
+        history.append({"role": "model", "parts": [reply]})
         return ChatResponse(reply=reply, action=None, session_id=req.session_id)
 
+    # 成功：双向记日志（user 只存原始消息，不含 context）
+    history.append({"role": "user", "parts": [req.message]})
     history.append({"role": "model", "parts": [reply]})
 
     action = None

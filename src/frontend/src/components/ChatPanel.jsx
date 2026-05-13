@@ -4,7 +4,7 @@ import remarkMath from 'remark-math'
 import remarkGfm from 'remark-gfm'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
-import { chat, getChatHistory } from '../api'
+import { chat, clearChatHistory, getChatHistory } from '../api'
 
 const MD_COMPONENTS = {
   p: ({ node, ...p }) => <p style={{ margin: '0.4em 0' }} {...p} />,
@@ -75,10 +75,26 @@ export default function ChatPanel() {
     setLoading(false)
   }
 
+  const handleClear = async () => {
+    if (!messages.length) return
+    const turns = messages.filter(m => (m.role === 'user' || m.role === 'assistant' || m.role === 'model')).length
+    if (!confirm(`确定清空 ${turns} 条对话历史？`)) return
+    try { await clearChatHistory('default') } catch { /* ignore */ }
+    setMessages([])
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <div style={{ fontWeight: 700, fontSize: 13, color: '#94a3b8', marginBottom: 8 }}>
-        与整合助手对话（可修改整合决策）
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, color: '#94a3b8' }}>
+          与整合助手对话（可修改整合决策）
+        </div>
+        {messages.length > 0 && (
+          <button onClick={handleClear} style={{
+            background: '#1e293b', border: '1px solid #334155', borderRadius: 6,
+            color: '#94a3b8', padding: '3px 10px', fontSize: 11, cursor: 'pointer',
+          }}>清空历史</button>
+        )}
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10 }}>
